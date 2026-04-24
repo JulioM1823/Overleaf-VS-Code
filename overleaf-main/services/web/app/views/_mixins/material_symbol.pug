@@ -1,0 +1,4 @@
+mixin material-symbol(icon, extraClass = null)
+	- extraClass = extraClass ? ' ' + extraClass : ''
+	span(aria-hidden='true' translate='no' class='material-symbols' + extraClass)&attributes(attributes)
+		| #{icon}

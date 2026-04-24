@@ -1,0 +1,10 @@
+.vscode/settings.json
+
+node_modules
+out
+*.vsix
+tmp/
+output/
+.DS_Store
+
+**/vendor/**

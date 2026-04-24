@@ -1,0 +1,55 @@
+html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+}
+
+#pdf-viewer {
+    display: block;
+    border: none;
+    overflow: hidden;
+    position: absolute;
+    width: 100%;
+    height: 100%;
+}
+
+#openFile, #print, #download {
+    display: none;
+}
+
+#secondaryOpenFile,
+#secondaryPrint,
+#secondaryDownload {
+    display: none;
+}
+
+.overleaf-workshop-sync-highlight {
+    position: absolute;
+    width: 26px;
+    height: 26px;
+    margin-left: -13px;
+    margin-top: -13px;
+    border: 2px solid rgba(255, 183, 3, 0.95);
+    border-radius: 999px;
+    background: rgba(255, 183, 3, 0.22);
+    box-shadow: 0 0 0 8px rgba(255, 183, 3, 0.16);
+    pointer-events: none;
+    z-index: 5;
+    animation: overleaf-workshop-sync-highlight-fade 1.6s ease-out forwards;
+}
+
+@keyframes overleaf-workshop-sync-highlight-fade {
+    0% {
+        opacity: 0;
+        transform: scale(0.65);
+    }
+    20% {
+        opacity: 1;
+        transform: scale(1);
+    }
+    100% {
+        opacity: 0;
+        transform: scale(1.35);
+    }
+}

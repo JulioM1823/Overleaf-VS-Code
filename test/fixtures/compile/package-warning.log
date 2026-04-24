@@ -1,0 +1,6 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.24
+(./main.tex
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\alpha' on input line 22.
+
+)
