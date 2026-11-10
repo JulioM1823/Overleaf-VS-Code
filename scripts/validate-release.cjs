@@ -46,8 +46,8 @@ function main() {
     log('validation.started', { cwd: process.cwd() });
 
     const packageJson = readJson('package.json');
-    const expectedRepositoryUrl = 'https://github.com/overleaf-workshop/overleaf-workshop';
-    const expectedIssuesUrl = 'https://github.com/overleaf-workshop/overleaf-workshop/issues';
+    const expectedRepositoryUrl = 'https://github.com/JulioM1823/Overleaf-VS-Code';
+    const expectedIssuesUrl = 'https://github.com/JulioM1823/Overleaf-VS-Code/issues';
 
     if (packageJson.publisher !== 'iamhyc') {
         throw new Error('Unexpected publisher change detected. Marketplace continuity requires a dedicated migration plan.');
