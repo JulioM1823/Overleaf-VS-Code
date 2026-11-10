@@ -19,7 +19,7 @@ You need desktop **VS Code 1.80 or later**, an Overleaf account with access to a
 
 1. Install **Overleaf-VS Code** by **AstroJulio** from Extensions.
 2. Select **Overleaf-VS Code** in the Activity Bar. In **Projects**, right-click **www.overleaf.com** → **Login to Server** → **Login with Cookies**.
-3. Sign in to Overleaf in your browser and open its project dashboard. Open the browser's developer tools → **Network**, then reload the dashboard.
+3. Use **Google Chrome** to sign in to Overleaf and open its project dashboard. **Safari and Firefox have not yet been tested** for this cookie sign-in method. Open Chrome's developer tools → **Network**, then reload the dashboard.
 4. Select the authenticated `project` request. Under request headers, copy the **Cookie** value. Paste it into Overleaf-VS Code's masked login input and press Enter. Treat this value like a password.
 5. Expand the server, right-click your project → **Open Project in Current Window**, then open the main `.tex` file.
 6. In the Command Palette, run **Overleaf-VS Code: Compile Project**, then **Overleaf-VS Code: View Compiled PDF**.
