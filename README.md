@@ -94,3 +94,7 @@ Roadmap planning is tracked through GitHub issues and maintainer planning instea
 - [Overleaf Web Route List](./docs/webapi.md)
 - [James-Yu/LaTeX-Workshop](https://github.com/James-Yu/LaTeX-Workshop)
 - [jlelong/vscode-latex-basics](https://github.com/jlelong/vscode-latex-basics/tags)
+
+## Source and issues
+
+Source code: [Overleaf-VS Code](https://github.com/JulioM1823/Overleaf-VS-Code). Report bugs in the [issue tracker](https://github.com/JulioM1823/Overleaf-VS-Code/issues).
