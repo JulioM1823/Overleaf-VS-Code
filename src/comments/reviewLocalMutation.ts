@@ -2,7 +2,7 @@ import { OverleafReviewMessageEntry, OverleafReviewThreadEntry } from './reviewI
 
 export interface ReviewLocalMutation {
     content?: string;
-    kind: 'deleteMessage' | 'editMessage';
+    kind: 'deleteMessage' | 'deleteThread' | 'editMessage';
     messageId: string;
     threadId: string;
 }
@@ -117,6 +117,11 @@ export function applyPendingReviewLocalMutations(
             continue;
         }
 
+        if (mutation.kind==='deleteThread') {
+            nextEntries.splice(existingIndex, 1);
+            retainedMutations.push(mutation);
+            continue;
+        }
         const existingMessage = existingEntry.messages.find((message) => message.id===mutation.messageId);
         if (mutation.kind==='editMessage') {
             if (!existingMessage) {

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
     isPdfArtifact,
+    isCompileLogArtifact,
     normalizeCompileArtifactPath,
     normalizeSyncResultFilePath,
     resolvePrimaryPdfOutputPath,
@@ -64,4 +65,10 @@ test('isPdfArtifact recognizes pdf type and file extension', () => {
     assert.equal(isPdfArtifact({path: 'build/result.pdf'}), true);
     assert.equal(isPdfArtifact({path: 'build/result.bin', type: 'pdf'}), true);
     assert.equal(isPdfArtifact({path: 'build/result.log'}), false);
+});
+
+test('isCompileLogArtifact recognizes output.log artifacts', () => {
+    assert.equal(isCompileLogArtifact({path: 'output.log'}), true);
+    assert.equal(isCompileLogArtifact({path: './nested/output.log'}), true);
+    assert.equal(isCompileLogArtifact({path: 'main.log'}), false);
 });

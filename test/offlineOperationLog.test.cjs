@@ -13,58 +13,19 @@ const {
     replaceDeferredSyncMessageId,
 } = require('../out/offline/offlineOperationLog.js');
 
-test('parseDeferredSyncQueueState filters invalid deferred operations', () => {
-    const parsed = parseDeferredSyncQueueState(JSON.stringify({
-        operations: [
-            {
-                createdAt: '2026-04-08T00:00:00.000Z',
-                id: 'valid-chat',
-                kind: 'chat.send',
-                payload: {
-                    content: 'hello',
-                    localMessageId: 'local-chat-1',
-                },
-            },
-        {
-            createdAt: '2026-04-08T00:00:01.000Z',
-            id: 'valid-chat-edit',
-            kind: 'chat.edit',
-            payload: {
-                content: 'edited hello',
-                messageId: 'server-chat-1',
-            },
-        },
-        {
-            createdAt: '2026-04-08T00:00:01.500Z',
-            id: 'valid-comment-anchor',
-            kind: 'comment.anchorExistingThread',
-            payload: {
-                content: 'root comment',
-                docId: 'doc-1',
-                filePath: 'main.tex',
-                localMessageId: 'server-message-1',
-                selectedText: 'selected',
-                serverMessageId: 'server-message-1',
-                startOffset: 42,
-                threadId: 'thread-1',
-            },
-        },
-        {
-            createdAt: '2026-04-08T00:00:02.000Z',
-            id: 'invalid-comment-create',
-            kind: 'comment.create',
-            payload: {
-                    content: 'missing required fields',
-                    threadId: 'thread-1',
-                },
-            },
-        ],
-    }));
+test('corrupt deferred operations are rejected without silently discarding queued user actions', () => {
+    assert.throws(() => parseDeferredSyncQueueState(JSON.stringify({version: 1, operations: [{id: 'pending', kind: 'comment.create', payload: {}}]})), /Invalid/);
+    assert.throws(() => parseDeferredSyncQueueState('null'), /Invalid/);
+});
 
-    assert.equal(parsed.operations.length, 3);
-    assert.equal(parsed.operations[0].id, 'valid-chat');
-    assert.equal(parsed.operations[1].id, 'valid-chat-edit');
-    assert.equal(parsed.operations[2].id, 'valid-comment-anchor');
+test('deferred operations retain causal order across equal timestamps and clock rollback', () => {
+    const {serializeDeferredSyncQueueState} = require('../out/offline/offlineOperationLog');
+    const operations = [
+        {id: 'z', createdAt: '2026-01-02', kind: 'chat.send', payload: {content: 'original', localMessageId: 'm'}},
+        {id: 'a', createdAt: '2026-01-02', kind: 'chat.edit', payload: {content: 'edited', messageId: 'm'}},
+        {id: 'b', createdAt: '2026-01-01', kind: 'chat.delete', payload: {messageId: 'm'}},
+    ];
+    assert.deepEqual(parseDeferredSyncQueueState(serializeDeferredSyncQueueState(createDeferredSyncQueueState(operations))).operations, operations);
 });
 
 test('replaceDeferredSyncMessageId updates follow-up operations for the same thread', () => {

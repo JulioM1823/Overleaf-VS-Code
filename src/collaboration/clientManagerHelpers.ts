@@ -23,6 +23,12 @@ export interface CollaboratorQuickPickItem {
 export type CollaboratorConnectionIndicatorState = 'connected' | 'disconnected' | 'reconnecting';
 export const COLLABORATOR_CONNECTION_INDICATOR_CONNECTED_HOLD_MS = 1_500;
 
+export function escapeCollaboratorMarkdownText(value: string) {
+    return value
+        .replace(/[\r\n\t]+/g, ' ')
+        .replace(/([\\`*_{}\[\]()#+\-.!<>|])/g, '\\$1');
+}
+
 function hashString(value: string) {
     let hash = 2166136261;
     for (let i = 0; i < value.length; i += 1) {

@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { ROOT_NAME } from '../consts';
 import { VirtualFileSystem } from '../core/remoteFileSystemProvider';
@@ -22,7 +23,68 @@ import {
 } from './reviewSyncPolicy';
 
 function createNonce() {
-    return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    return crypto.randomBytes(16).toString('base64');
+}
+
+type ReviewWebviewMessage =
+    | {type: 'ready'}
+    | {type: 'refresh'}
+    | {type: 'toggle-show-resolved', showResolved: boolean}
+    | {type: 'navigate-thread', threadId: string}
+    | {type: 'resolve-thread', threadId: string}
+    | {type: 'reopen-thread', threadId: string}
+    | {type: 'edit-comment', messageId: string, threadId: string}
+    | {type: 'delete-comment', messageId: string, threadId: string}
+    | {type: 'delete-thread', threadId: string}
+    | {type: 'reply-comment', content: string, threadId: string};
+
+const MAX_REVIEW_WEBVIEW_ID_LENGTH = 1_024;
+const MAX_REVIEW_REPLY_LENGTH = 100_000;
+
+function normalizeWebviewString(value: unknown, maxLength: number): string | undefined {
+    return typeof value === 'string' && value.length <= maxLength ? value : undefined;
+}
+
+function normalizeReviewWebviewMessage(message: unknown): ReviewWebviewMessage | undefined {
+    if (message === null || typeof message !== 'object') {
+        return undefined;
+    }
+
+    const candidate = message as Record<string, unknown>;
+    const threadId = () => normalizeWebviewString(candidate.threadId, MAX_REVIEW_WEBVIEW_ID_LENGTH);
+    const messageId = () => normalizeWebviewString(candidate.messageId, MAX_REVIEW_WEBVIEW_ID_LENGTH);
+
+    switch (candidate.type) {
+        case 'ready':
+        case 'refresh':
+            return {type: candidate.type};
+        case 'toggle-show-resolved':
+            return {type: 'toggle-show-resolved', showResolved: candidate.showResolved === true};
+        case 'navigate-thread':
+        case 'resolve-thread':
+        case 'reopen-thread':
+        case 'delete-thread': {
+            const normalizedThreadId = threadId();
+            return normalizedThreadId === undefined ? undefined : {type: candidate.type, threadId: normalizedThreadId};
+        }
+        case 'edit-comment':
+        case 'delete-comment': {
+            const normalizedThreadId = threadId();
+            const normalizedMessageId = messageId();
+            return normalizedThreadId === undefined || normalizedMessageId === undefined
+                ? undefined
+                : {type: candidate.type, threadId: normalizedThreadId, messageId: normalizedMessageId};
+        }
+        case 'reply-comment': {
+            const normalizedThreadId = threadId();
+            const content = normalizeWebviewString(candidate.content, MAX_REVIEW_REPLY_LENGTH);
+            return normalizedThreadId === undefined || content === undefined
+                ? undefined
+                : {type: 'reply-comment', threadId: normalizedThreadId, content};
+        }
+        default:
+            return undefined;
+    }
 }
 
 export class ReviewViewProvider implements vscode.WebviewViewProvider {
@@ -503,7 +565,7 @@ export class ReviewViewProvider implements vscode.WebviewViewProvider {
         messageId: string,
         threadId: string,
     }) {
-        if (options.kind!=='editMessage' && options.kind!=='deleteMessage') {
+        if (options.kind!=='editMessage' && options.kind!=='deleteMessage' && options.kind!=='deleteThread') {
             this.logDiagnostic('local_mutation_skipped_invalid_kind', {
                 kind: options.kind,
                 messageId: options.messageId,
@@ -532,6 +594,11 @@ export class ReviewViewProvider implements vscode.WebviewViewProvider {
         }
         const existingEntry = resolvedTarget.entry;
         const targetThreadId = existingEntry.threadId;
+        if (options.kind==='deleteThread') {
+            this.entriesByThreadId.delete(targetThreadId);
+            this.renderCurrentEntries();
+            return;
+        }
         let nextEntry = existingEntry;
         if (options.kind==='editMessage' && typeof options.content==='string') {
             nextEntry = applyReviewMessageEditLocally(existingEntry, options.messageId, options.content);
@@ -1042,13 +1109,17 @@ export class ReviewViewProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    private async handleWebviewMessage(message: {
-        content?: string,
-        messageId?: string,
-        showResolved?: boolean,
-        type: string,
-        threadId?: string,
-    }) {
+    private async handleWebviewMessage(rawMessage: unknown) {
+        const message = normalizeReviewWebviewMessage(rawMessage);
+        if (message === undefined) {
+            this.logDiagnostic('webview_message_ignored', {
+                type: typeof rawMessage === 'object' && rawMessage !== null
+                    ? String((rawMessage as Record<string, unknown>).type ?? '')
+                    : typeof rawMessage,
+            });
+            return;
+        }
+
         switch (message.type) {
             case 'ready':
                 this.ready = true;
@@ -1095,8 +1166,12 @@ export class ReviewViewProvider implements vscode.WebviewViewProvider {
                     await this.replyToThread(message.threadId, message.content);
                 }
                 return;
-            default:
-                this.logDiagnostic('webview_message_unknown', {type: message.type});
+            default: {
+                const unknownMessage = message as {type?: unknown};
+                this.logDiagnostic('webview_message_unknown', {
+                    type: typeof unknownMessage.type==='string' ? unknownMessage.type : 'unknown',
+                });
+            }
         }
     }
 
@@ -1104,6 +1179,9 @@ export class ReviewViewProvider implements vscode.WebviewViewProvider {
         const nonce = createNonce();
         const csp = [
             `default-src 'none'`,
+            `base-uri 'none'`,
+            `object-src 'none'`,
+            `img-src data:`,
             `style-src ${webview.cspSource} 'unsafe-inline'`,
             `script-src 'nonce-${nonce}'`,
         ].join('; ');
@@ -1806,7 +1884,7 @@ export class ReviewViewProvider implements vscode.WebviewViewProvider {
         this.webviewView = webviewView;
         ReviewViewProvider.resolvedProvidersByOrigin.set(this.originKey, this);
         this.ready = false;
-        webviewView.webview.options = {enableScripts: true};
+        webviewView.webview.options = {enableScripts: true, localResourceRoots: []};
         webviewView.webview.html = this.getHtml(webviewView.webview);
         this.logDiagnostic('webview.resolved');
         webviewView.webview.onDidReceiveMessage((message) => {

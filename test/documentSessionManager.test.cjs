@@ -36,6 +36,9 @@ const vscodeMock = {
             }
             return true;
         },
+        getConfiguration: () => ({
+            get: (_key, fallback) => fallback,
+        }),
         textDocuments: [],
     },
 };
@@ -84,6 +87,17 @@ Module._load = function patchedLoad(request, parent, isMain) {
 
 const { DocumentSessionManager } = require('../out/core/documentSessionManager.js');
 const { createLocalReplicaSnapshot } = require('../out/scm/localReplicaSyncState.js');
+
+test('shutdown checkpoints every editor even when another draft write fails', async () => {
+    const manager=Object.create(DocumentSessionManager.prototype);const saved=[];
+    manager.sessions=new Map([
+        ['first',{remoteText:'base',vfs:{persistTextDocumentDraft:async()=>{throw new Error('disk failure');}}}],
+        ['second',{remoteText:'base',vfs:{persistTextDocumentDraft:async(_uri,text)=>{saved.push(text);}}}],
+    ]);
+    manager.readCurrentSessionText=()=> 'unsaved draft';
+    await assert.rejects(manager.persistOpenDrafts(),/disk failure/);
+    assert.deepEqual(saved,['unsaved draft']);
+});
 
 function createUri(value, path = '/main.tex') {
     return {
@@ -720,6 +734,7 @@ test('flushSession defers while realtime recovery is still in progress', async (
                 throw new Error('push should not run while recovering');
             },
             realtimeConnectionPhase: 'recovering',
+            persistTextDocumentDraft: async () => {},
         },
     };
 
@@ -1081,4 +1096,112 @@ test('prepareProjectForRemoteOperation blocks while a managed session still requ
     const result = await manager.prepareProjectForRemoteOperation(createUri('overleaf://server/project'), 'compile_preflight');
 
     assert.equal(result, 'blocked');
+});
+
+test('remote editor updates are serialized in arrival order and flushing waits for the queue', async () => {
+    const manager = new DocumentSessionManager({});
+    const session = {docId: 'd', origin: 'o', key: 'o::d', localText: 'local', remoteText: 'remote', status: 'live'};
+    manager.sessions.set(session.key, session);
+    const calls = []; let release;
+    const gate = new Promise(resolve => {release = resolve;});
+    manager.applyRemoteTextUpdate = async arg => {calls.push(`start${arg.id}`); if(arg.id===1) await gate; calls.push(`end${arg.id}`);};
+    manager.scheduleFlush = () => calls.push('flush');
+    const first = manager.handleRemoteTextUpdate({origin: 'o', docId: 'd', id: 1});
+    const second = manager.handleRemoteTextUpdate({origin: 'o', docId: 'd', id: 2});
+    await Promise.resolve(); assert.deepEqual(calls, ['start1']);
+    release(); await Promise.all([first, second]);
+    assert.deepEqual(calls, ['start1', 'end1', 'start2', 'end2', 'flush']);
+});
+
+test('out-of-order asynchronous comment updates cannot roll editor text or version backward', async () => {
+    const manager = new DocumentSessionManager({}); let release;
+    const gate = new Promise(resolve => {release = resolve;});
+    const session = {localText: 'base', localVersion: 0, usesLocalReplica: true, status: 'syncing', vfs: {
+        applyLocalTextDocumentChangesToCommentRanges: async (_uri, _old, text) => {if(text==='first') await gate;},
+    }};
+    const first = manager.processSessionDocumentChange(session, 'first');
+    const second = manager.processSessionDocumentChange(session, 'second');
+    await second; release(); await first;
+    assert.equal(session.localText, 'second'); assert.equal(session.localVersion, 2);
+});
+
+test('failed authoritative recovery never substitutes stale cached data', async () => {
+    const manager = new DocumentSessionManager({});
+    const session = {usesLocalReplica: true, openDocumentUris: new Set(), localText: 'keep local', vfs: {
+        refreshTextDocumentSessionFromServer: async () => {throw new Error('checkpoint unavailable');},
+        ensureTextDocumentSession: async () => {throw new Error('must not use stale cache');},
+    }};
+    await assert.rejects(manager.recoverSession(session, 'test'), /checkpoint unavailable/);
+    assert.equal(session.localText, 'keep local');
+});
+function revisionFixture(){
+    const manager=new DocumentSessionManager({});
+    const conflicts=[];let recovery=0,edits=0;
+    const session={docId:'d',origin:'o',key:'o::d',localText:'base',remoteText:'base',remoteVersion:4,localVersion:0,status:'live',
+        openDocumentUris:new Set(),overleafUri:createUri('overleaf://server/main.tex'),vfs:{
+            isOfflineMode:false,realtimeConnectionPhase:'live',acceptRemoteTextUpdate(){},
+            recordDocumentSyncConflict:async record=>conflicts.push(record),requestRealtimeRecovery:async()=>{recovery++;},
+            toDocumentSyncRelPath:()=>'/main.tex',ensureTextDocumentSession:async()=>({remoteText:'remote',version:5}),
+        }};
+    manager.sessions.set(session.key,session);
+    manager.applyRemoteTextToOpenDocuments=async(_session,text)=>{edits++;session.localText=text;return 'applied';};
+    manager.scheduleFlush=()=>{};manager.clearSessionIfUnused=()=>{};
+    const update=(v,previous='base',next='remote')=>({docId:'d',origin:'o',overleafUri:'uri',previousRemoteText:previous,nextRemoteText:next,
+        update:{v,op:[{p:0,i:'remote'}]}});
+    return {manager,session,conflicts,update,get recovery(){return recovery;},get edits(){return edits;}};
+}
+test('updates queued before an authoritative recovery cannot overwrite the recovered revision',async()=>{
+    const f=revisionFixture();let checkpoint;
+    f.session.vfs.ensureTextDocumentSession=()=>new Promise(resolve=>{checkpoint=resolve;});
+    const recovery=f.manager.startRecovery(f.session,'reconnect');
+    await new Promise(resolve=>setImmediate(resolve));
+    const old=f.manager.handleRemoteTextUpdate(f.update(4,'base','old remote'));
+    checkpoint({remoteText:'latest remote',version:7});await Promise.all([recovery,old]);
+    assert.equal(f.session.remoteVersion,7);assert.equal(f.session.localText,'latest remote');assert.equal(f.edits,1);assert.equal(f.conflicts.length,0);
+});
+test('duplicate remote revisions are ignored before editing and mismatched bases preserve recoverable copies',async()=>{
+    const f=revisionFixture();
+    await f.manager.handleRemoteTextUpdate(f.update(3));assert.equal(f.edits,0);assert.equal(f.session.localText,'base');
+    await f.manager.handleRemoteTextUpdate(f.update(5,'different base','later remote'));
+    assert.equal(f.edits,0);assert.equal(f.session.status,'recovery-required');assert.equal(f.conflicts.length,1);assert.equal(f.recovery,1);
+    assert.equal(new TextDecoder().decode(f.conflicts[0].localContent),'base');
+});
+test('repeated stale editor applications become explicit recoverable failures instead of silent divergence',async()=>{
+    const f=revisionFixture();f.manager.applyRemoteTextToOpenDocuments=async()=> 'stale-local-state';
+    await f.manager.handleRemoteTextUpdate(f.update(4));
+    assert.equal(f.session.status,'recovery-required');assert.equal(f.session.localText,'base');
+    assert.equal(f.conflicts[0].reason,'document_remote_update_stale_local_retry_exhausted');assert.equal(f.recovery,1);
+});
+test('recovery rejects older checkpoints and repeated stale local state retains local and remote copies',async()=>{
+    const f=revisionFixture();f.session.vfs.ensureTextDocumentSession=async()=>({remoteText:'older',version:3});
+    await assert.rejects(f.manager.recoverSession(f.session,'test'),/older/);assert.equal(f.edits,0);
+    f.session.vfs.ensureTextDocumentSession=async()=>({remoteText:'remote',version:5});
+    f.manager.applyRemoteTextToOpenDocuments=async()=> 'stale-local-state';
+    await f.manager.recoverSession(f.session,'test');assert.equal(f.session.status,'recovery-required');
+    assert.equal(f.conflicts[0].reason,'document_recovery_stale_local_retry_exhausted');
+});
+test('a late flush completion cannot replace a remote update that finished during checkpoint persistence',async()=>{
+    const f=revisionFixture();f.session.localText='local';let finish;
+    f.session.vfs.pushTextDocumentChanges=()=>new Promise(resolve=>{finish=resolve;});
+    const pending=f.manager.flushSession(f.session,'test');await Promise.resolve();
+    f.session.remoteText='newer remote';f.session.localText='newer local';f.session.remoteVersion=6;
+    finish({kind:'applied'});await pending;
+    assert.equal(f.session.remoteText,'newer remote');assert.equal(f.session.remoteVersion,6);assert.equal(f.session.localText,'newer local');
+});
+test('reattaching an editor does not adopt a checkpoint ahead of still-queued remote edits',async()=>{
+    const f=revisionFixture();f.session.pendingRemoteUpdates=1;
+    const document={uri:createUri('overleaf://server/main.tex'),getText:()=> 'base'};
+    f.manager.resolveBinding=async()=>({docId:'d',loadedFromCache:false,localText:'base',remoteText:'remote',remoteVersion:5,
+        overleafUri:document.uri,sessionKey:f.session.key,status:'live',usesLocalReplica:false,
+        vfs:{...f.session.vfs,origin:{toString:()=> 'o'}}});
+    await f.manager.attachDocument(document,'reattach');
+    assert.equal(f.session.remoteVersion,4);assert.equal(f.session.remoteText,'base');f.session.pendingRemoteUpdates=0;
+    await f.manager.handleRemoteTextUpdate(f.update(4));assert.equal(f.session.localText,'remote');assert.equal(f.session.remoteVersion,5);
+});
+test('remote-operation preflight waits for queued editor updates before considering local text synchronized',async()=>{
+    const f=revisionFixture();let release,drained=false;
+    f.manager.vfsm={prefetch:async()=>f.session.vfs};f.session.pendingRemoteUpdates=1;
+    f.session.remoteUpdateQueue={idle:()=>new Promise(resolve=>{release=()=>{drained=true;f.session.pendingRemoteUpdates=0;resolve();};})};
+    const pending=f.manager.drainSessionForRemoteOperation(f.session,'compile');await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(drained,false);release();await pending;assert.equal(drained,true);
 });

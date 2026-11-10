@@ -30,6 +30,21 @@ The following settings are available under `overleaf-workshop.diagnostics.*`:
 
 When diagnostics are disabled, warning and error records still emit for low-overhead operational visibility.
 
+## Privacy
+
+Document/message bodies, credentials, names, identifiers and path/URL fields are
+redacted before console output, buffering, snapshots or clipboard export. Sensitive
+objects and arrays are redacted as complete containers, including their keys.
+Free-form error messages and stacks are redacted; arbitrary thrown objects become
+a fixed error marker. Operational event names, error classes/codes, counts,
+durations and status values remain available.
+
+Redacted strings use a process-local keyed digest. Matching values can be correlated
+within one extension-host process; their digests change after a restart and cannot
+be compared to a public SHA-256 dictionary. These remain pseudonyms, not a claim of
+complete anonymization. Normalization bounds depth, collections and total values,
+and replaces cycles, so malformed diagnostics cannot recurse indefinitely.
+
 ## Developer Commands
 
 Use the command palette with these commands:
@@ -47,6 +62,8 @@ Use the command palette with these commands:
 `Dump Diagnostics Snapshot` writes state and recent records to the diagnostics output channel and copies the snapshot JSON to the clipboard.
 `Dump Active Project Diagnostics` opens a project-scoped JSON snapshot with queue summaries, recent project records, EventBus state, offline storage, and document-sync journal coverage.
 `Retry Active Project Sync` manually nudges realtime recovery when disconnected or initializing, then retries deferred synchronization and refreshes comment/review state.
+
+Deferred synchronization queue changes are logged with `offline.queue_transition`. These records include a `queueRevision`, before/after operation counts, counts by operation kind, and a sanitized operation sample without message/comment body content.
 
 ## Tracing and Timing Utilities
 
@@ -87,12 +104,12 @@ The extension currently registers:
 - `documentSessions` provider: open document-session status, pending flush/recovery state, local-delta flags, and suppressed edit state
 - `compileManager` provider: compile status, pending compile-on-save/queued compile requests, and active PDF views
 - `filesystem:provider` provider: active VFS/project inventory across the extension host
-- `sync` provider: connection phase, sync mode, recovery state, queue/retry state
+- `sync` provider: connection phase, sync mode, recovery state, queue/retry state, deferred queue revision
 - `chat` provider: message counts, queue/replay/confirmation state, chat transport availability
 - `comments` provider: thread/range counts, load state, resolved-thread counts
 - `filesystem` provider: root/cache/watch status, document counts, output build markers
 - `network` provider: socket scheme/session/transport/connectivity state
-- `offline` provider: deferred operation counts/kinds and offline persistence/retry scheduling
+- `offline` provider: deferred operation counts/kinds, sanitized queue samples, queue revision, and offline persistence/retry scheduling
 
 Additional subsystem providers can be added incrementally without changing core behavior.
 
@@ -107,7 +124,7 @@ The comment diagnostics snapshot now includes comment-specific recovery and pari
 - per-document inline vs review parity summaries
 - comment VFS anomaly counts for threads without ranges, ranges without threads, and sampled alias mappings
 
-Use `Overleaf Workshop: Dump Comment Diagnostics Snapshot` after reproducing a reconnect/import issue. The snapshot is designed to answer three questions quickly:
+Use `Overleaf-VS Code: Dump Comment Diagnostics Snapshot` after reproducing a reconnect/import issue. The snapshot is designed to answer three questions quickly:
 
 1. Did the VFS load both thread messages and anchor ranges?
 2. Did inline render the imported thread for the affected document?
@@ -117,7 +134,7 @@ Use `Overleaf Workshop: Dump Comment Diagnostics Snapshot` after reproducing a r
 
 The inline comment diagnostics snapshot now includes an `interactionState` section under `inlineProviderState` for the instant-open / no-auto-open workflow.
 
-Use `Overleaf Workshop: Dump Comment Diagnostics` after reproducing a comment creation or project-open issue, then check:
+Use `Overleaf-VS Code: Dump Comment Diagnostics` after reproducing a comment creation or project-open issue, then check:
 
 - `inlineProviderState.interactionState.pendingCreatedCommentFocus`
   - shows queued pending create-focus requests per URI

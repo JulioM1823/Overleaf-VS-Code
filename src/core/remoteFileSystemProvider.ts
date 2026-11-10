@@ -1,7 +1,8 @@
+import { AsyncQueue } from '../utils/asyncQueue';
 /* eslint-disable @typescript-eslint/naming-convention */
 import * as vscode from 'vscode';
 import * as DiffMatchPatch from 'diff-match-patch';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID as uuidv4 } from 'crypto';
 import {
     BaseAPI,
     Identity,
@@ -59,6 +60,10 @@ import {
     isLikelyConnectivityFailure,
 } from './offlineSyncState';
 import {
+    ExternalLinkedFileUrlValidationIssue,
+    validateExternalLinkedFileUrl,
+} from './linkedFileUrlPolicy';
+import {
     resolveConnectedSyncNotificationKind,
     resolveSyncNotificationState,
     shouldScheduleDisconnectNotification,
@@ -74,6 +79,10 @@ import {
     resolvePrimaryPdfOutputPath,
     selectPrimaryPdfArtifact,
 } from '../compile/compileArtifacts';
+import {
+    buildCompileFailureDiagnostics,
+    getCompileFailureSummary,
+} from '../compile/compileFailure';
 import {
     canDeleteCommentMessage,
     canDeleteThread,
@@ -134,6 +143,7 @@ import {
 } from '../comments/commentReplaySafety';
 import {
     applyTextOperationsToString,
+    mergeRemoteTextIntoLocalText,
     buildTextOperations,
     extractTextOperations,
     resolveJoinedDocumentTextState,
@@ -216,6 +226,7 @@ import {
 } from '../offline/documentSyncJournal';
 import {
     resolveLocalReplicaWorkspaceForOverleafUri,
+    splitSafeProjectPath,
 } from '../scm/localReplicaWorkspace';
 import {
     doesVfsMatchActiveWorkspaceProject,
@@ -266,6 +277,7 @@ export interface DocumentEntity extends FileEntity {
     mtime?: number,
     lastVersion?: number,
     localCache?: string,
+    recoveryRequired?: boolean,
     remoteCache?: string,
 }
 
@@ -323,6 +335,26 @@ export interface ProjectEntity {
     settings: ProjectSettingsSchema,
 }
 
+function formatExternalLinkedFileUrlValidationIssue(issue: ExternalLinkedFileUrlValidationIssue) {
+    switch (issue) {
+        case 'empty':
+        case 'invalid':
+            return vscode.l10n.t('Enter a valid HTTPS URL.');
+        case 'unsupported-protocol':
+            return vscode.l10n.t('Only HTTPS URLs can be imported from external sources.');
+        case 'embedded-credentials':
+            return vscode.l10n.t('URLs with embedded usernames or passwords are not allowed.');
+        case 'unsupported-port':
+            return vscode.l10n.t('External linked files must use the default HTTPS port.');
+        case 'private-host':
+            return vscode.l10n.t('Local, private, and reserved network addresses are not allowed.');
+        case 'internal-host':
+            return vscode.l10n.t('Use a public hostname for external linked files.');
+        case 'credential-query':
+            return vscode.l10n.t('This URL appears to contain credentials or a signed-link token.');
+    }
+}
+
 export class File implements vscode.FileStat {
     type: vscode.FileType;
     name: string;
@@ -355,6 +387,7 @@ export function parseUri(uri: vscode.Uri) {
 }
 
 export interface OverleafTextDocumentSessionState {
+    recoveryRequired?: boolean,
     docId: string,
     loadedFromCache: boolean,
     localText: string,
@@ -365,6 +398,7 @@ export interface OverleafTextDocumentSessionState {
 
 export type LiveTextDocumentSyncResult =
     | { kind: 'applied' }
+    | { kind: 'queued' }
     | { kind: 'noop' }
     | { kind: 'offline' }
     | { kind: 'recovery-required' };
@@ -382,6 +416,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     private isDirty: boolean = true;
     private initializing?: Promise<ProjectEntity>;
     private retryConnection: number = 0;
+    private lastRealtimeConnectionAcceptedAtMs?: number;
     private remoteWatchRegistered: boolean = false;
     private readonlyMode: boolean = false;
     private bootstrapSource: 'socket' | 'fallback' | 'offline' = 'socket';
@@ -405,6 +440,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     private hasShownDisconnectNotification = false;
     private lastSyncNotification?: {at: number, kind: SyncNotificationKind};
     private deferredSynchronizationQueue: DeferredSyncQueueState = createDeferredSyncQueueState();
+    private deferredSynchronizationQueueRevision = 0;
     private readonly offlineStore: ProjectOfflineStore;
     private readonly documentSyncJournal: DocumentSyncJournal;
     private offlineStatePersistPromise: Promise<void> = Promise.resolve();
@@ -424,6 +460,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     private commentThreadAliases = new Map<string, string>();
     private commentThreadsLoaded = false;
     private commentThreadsLoading?: Promise<void>;
+    private commentThreadsFetchSequence = 0;
     private commentReconnectRefreshPromise?: Promise<void>;
     private projectCommentRangesHydrationPromise?: Promise<void>;
     private projectCommentWarmupPromise?: Promise<void>;
@@ -437,6 +474,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     private chatRealtimeConfirmationRefreshAttempt = 0;
     private chatRealtimeConfirmationRefreshTimer?: ReturnType<typeof setTimeout>;
     private chatRealtimeConfirmationRefreshDeadline?: number;
+    private draftWrites?: AsyncQueue;
     private pendingLocalTextEchoes = new Map<string, Array<{nextVersion: number, signature: string, version: number}>>();
     private notify: (events:vscode.FileChangeEvent[])=>void;
     private chatViewProviderItem?: {provider: ChatViewProvider, triggers: vscode.Disposable[]};
@@ -445,6 +483,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     private readonly chatSession: ProjectChatSession;
     private readonly diagnosticsStateProviderRegistrations: Array<{dispose: () => void}> = [];
     private disposed = false;
+    private sessionEndedSubscription?: vscode.Disposable;
 
     public readonly origin: vscode.Uri;
     public readonly projectName: string;
@@ -465,6 +504,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                 origin: this.origin.toString(),
             });
             this.disposed = true;
+            this.sessionEndedSubscription?.dispose();
             if (this.pendingDisconnectNotificationTimer) {
                 clearTimeout(this.pendingDisconnectNotificationTimer);
                 this.pendingDisconnectNotificationTimer = undefined;
@@ -515,6 +555,9 @@ export class VirtualFileSystem extends vscode.Disposable {
         this.notify = notify;
         this.api = api;
         this.socket = socket;
+        this.sessionEndedSubscription = EventBus.on('serverSessionEndedEvent', ({serverName}) => {
+            if (serverName===this.serverName) { this.dispose(); }
+        });
         this.offlineStore = new ProjectOfflineStore(
             this.context,
             this.origin,
@@ -570,8 +613,8 @@ export class VirtualFileSystem extends vscode.Disposable {
         uri: vscode.Uri,
         notify: (events:vscode.FileChangeEvent[])=>void,
     ) {
-        const {projectId, serverName} = parseUri(uri);
-        const res = await GlobalStateManager.initSocketIOAPI(context, serverName, projectId);
+        const {projectId, serverName, userId} = parseUri(uri);
+        const res = await GlobalStateManager.initSocketIOAPI(context, serverName, projectId, userId);
         if (!res) {
             throw new Error(vscode.l10n.t('Cannot init SocketIOAPI for {serverName}', {serverName}));
         }
@@ -705,15 +748,19 @@ export class VirtualFileSystem extends vscode.Disposable {
             relPath,
         }, (state) => {
             const existing = state.records[relPath];
+            const remoteVersion = arg.lastKnownRemoteVersion ?? arg.baseVersion;
+            const preserveRemoteState = existing?.lastKnownRemoteVersion!==undefined
+                && (remoteVersion===undefined || remoteVersion<existing.lastKnownRemoteVersion);
             state.records[relPath] = {
                 baseBlobId: existing?.baseBlobId ?? baseBlobId,
                 baseSnapshot: existing?.baseSnapshot ?? baseSnapshot,
                 baseVersion: existing?.baseVersion ?? arg.baseVersion,
                 conflict: existing?.conflict,
                 docId: arg.docId ?? existing?.docId,
-                lastKnownRemoteSnapshot: lastKnownRemoteSnapshot ?? existing?.lastKnownRemoteSnapshot ?? baseSnapshot,
-                lastKnownRemoteVersion: arg.lastKnownRemoteVersion ?? existing?.lastKnownRemoteVersion ?? arg.baseVersion,
+                lastKnownRemoteSnapshot: preserveRemoteState ? existing?.lastKnownRemoteSnapshot : lastKnownRemoteSnapshot ?? existing?.lastKnownRemoteSnapshot ?? baseSnapshot,
+                lastKnownRemoteVersion: preserveRemoteState ? existing?.lastKnownRemoteVersion : remoteVersion ?? existing?.lastKnownRemoteVersion,
                 lastRecoveryRunId: existing?.lastRecoveryRunId,
+                localBlobId: existing?.localBlobId,
                 localDirty: true,
                 relPath,
             };
@@ -744,6 +791,8 @@ export class VirtualFileSystem extends vscode.Disposable {
             relPath,
         }, (state) => {
             const existing = state.records[relPath];
+            if (arg.version!==undefined && existing?.lastKnownRemoteVersion!==undefined
+                && arg.version < existing.lastKnownRemoteVersion) { return; }
             if (!existing) {
                 if (!snapshot) {
                     return;
@@ -782,6 +831,10 @@ export class VirtualFileSystem extends vscode.Disposable {
             docId: arg.docId ?? '',
             relPath,
         }, (state) => {
+            const existing = state.records[relPath];
+            if (arg.version!==undefined && existing?.lastKnownRemoteVersion!==undefined
+                && arg.version < existing.lastKnownRemoteVersion) { return; }
+            const pendingLocalBlob = existing?.localBlobId!==blobId ? existing?.localBlobId : undefined;
             state.records[relPath] = {
                 baseBlobId: blobId,
                 baseSnapshot: snapshot,
@@ -791,7 +844,8 @@ export class VirtualFileSystem extends vscode.Disposable {
                 lastKnownRemoteSnapshot: snapshot,
                 lastKnownRemoteVersion: arg.version,
                 lastRecoveryRunId: undefined,
-                localDirty: false,
+                localBlobId: pendingLocalBlob,
+                localDirty: pendingLocalBlob!==undefined,
                 relPath,
             };
         });
@@ -820,49 +874,58 @@ export class VirtualFileSystem extends vscode.Disposable {
         relPath: string,
         remoteContent?: Uint8Array,
     }) {
-        const relPath = this.normalizeDocumentSyncRelPath(arg.relPath);
-        const baseBlobId = arg.baseContent ? await this.writeDocumentSyncBlob(arg.baseContent) : undefined;
-        const localBlobId = arg.localContent ? await this.writeDocumentSyncBlob(arg.localContent) : undefined;
-        const remoteBlobId = arg.remoteContent ? await this.writeDocumentSyncBlob(arg.remoteContent) : undefined;
-        const baseSnapshot = this.createFileSnapshot(arg.baseContent);
-        const remoteSnapshot = this.createFileSnapshot(arg.remoteContent ?? arg.lastKnownRemoteContent);
-        const conflict: DocumentSyncConflictState = {
-            baseBlobId,
-            detectedAt: new Date().toISOString(),
-            localBlobId,
-            reason: arg.reason,
-            remoteBlobId,
-        };
-        await this.updateDocumentSyncState(arg.reason, {
-            docId: arg.docId ?? '',
-            relPath,
-        }, (state) => {
-            const existing = state.records[relPath];
-            state.records[relPath] = {
-                baseBlobId: existing?.baseBlobId ?? baseBlobId,
-                baseSnapshot: existing?.baseSnapshot ?? baseSnapshot,
-                baseVersion: existing?.baseVersion ?? arg.baseVersion,
-                conflict,
-                docId: arg.docId ?? existing?.docId,
-                lastKnownRemoteSnapshot: remoteSnapshot ?? existing?.lastKnownRemoteSnapshot,
-                lastKnownRemoteVersion: arg.lastKnownRemoteVersion ?? existing?.lastKnownRemoteVersion ?? arg.baseVersion,
-                lastRecoveryRunId: arg.recoveryRunId ?? existing?.lastRecoveryRunId,
-                localDirty: true,
-                relPath,
+        // Order complete conflict checkpoints with draft writes from subsequent
+        // keystrokes, including blob I/O before the journal transaction.
+        this.draftWrites ??= new AsyncQueue();
+        return this.draftWrites.run(async () => {
+            const relPath = this.normalizeDocumentSyncRelPath(arg.relPath);
+            const baseBlobId = arg.baseContent ? await this.writeDocumentSyncBlob(arg.baseContent) : undefined;
+            const localBlobId = arg.localContent ? await this.writeDocumentSyncBlob(arg.localContent) : undefined;
+            const remoteBlobId = arg.remoteContent ? await this.writeDocumentSyncBlob(arg.remoteContent) : undefined;
+            const baseSnapshot = this.createFileSnapshot(arg.baseContent);
+            const remoteSnapshot = this.createFileSnapshot(arg.remoteContent ?? arg.lastKnownRemoteContent);
+            const conflict: DocumentSyncConflictState = {
+                baseBlobId,
+                detectedAt: new Date().toISOString(),
+                localBlobId,
+                reason: arg.reason,
+                remoteBlobId,
             };
-        });
-        this.logDiagnostic('document_sync.conflict_recorded', {
-            baseBlobPresent: baseBlobId !== undefined,
-            baseHash: baseSnapshot?.hash,
-            baseVersion: arg.baseVersion ?? -1,
-            conflictStatePresent: true,
-            docId: arg.docId ?? '',
-            localHash: arg.localContent ? createLocalReplicaSnapshot('file', arg.localContent).hash : undefined,
-            relPath,
-            remoteHash: remoteSnapshot?.hash,
-            remoteVersion: arg.lastKnownRemoteVersion ?? -1,
-            reason: arg.reason,
-            recoveryRunId: arg.recoveryRunId ?? '',
+            await this.updateDocumentSyncState(arg.reason, {
+                docId: arg.docId ?? '',
+                relPath,
+            }, (state) => {
+                const existing = state.records[relPath];
+                const remoteVersion = arg.lastKnownRemoteVersion ?? arg.baseVersion;
+                const preserveRemoteState = existing?.lastKnownRemoteVersion!==undefined
+                    && (remoteVersion===undefined || remoteVersion<existing.lastKnownRemoteVersion);
+                state.records[relPath] = {
+                    baseBlobId: existing?.baseBlobId ?? baseBlobId,
+                    baseSnapshot: existing?.baseSnapshot ?? baseSnapshot,
+                    baseVersion: existing?.baseVersion ?? arg.baseVersion,
+                    conflict,
+                    docId: arg.docId ?? existing?.docId,
+                    lastKnownRemoteSnapshot: preserveRemoteState ? existing?.lastKnownRemoteSnapshot : remoteSnapshot ?? existing?.lastKnownRemoteSnapshot,
+                    lastKnownRemoteVersion: preserveRemoteState ? existing?.lastKnownRemoteVersion : remoteVersion ?? existing?.lastKnownRemoteVersion,
+                    lastRecoveryRunId: arg.recoveryRunId ?? existing?.lastRecoveryRunId,
+                    localBlobId: localBlobId ?? existing?.localBlobId,
+                    localDirty: true,
+                    relPath,
+                };
+            });
+            this.logDiagnostic('document_sync.conflict_recorded', {
+                baseBlobPresent: baseBlobId !== undefined,
+                baseHash: baseSnapshot?.hash,
+                baseVersion: arg.baseVersion ?? -1,
+                conflictStatePresent: true,
+                docId: arg.docId ?? '',
+                localHash: arg.localContent ? createLocalReplicaSnapshot('file', arg.localContent).hash : undefined,
+                relPath,
+                remoteHash: remoteSnapshot?.hash,
+                remoteVersion: arg.lastKnownRemoteVersion ?? -1,
+                reason: arg.reason,
+                recoveryRunId: arg.recoveryRunId ?? '',
+            });
         });
     }
 
@@ -957,6 +1020,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             connectionPhaseSequence: this.connectionPhaseSequence,
             deferredOperationCount: this.deferredSynchronizationQueue.operations.length,
             deferredOperationCountsByKind: this.summarizeDeferredOperationCountsByKind(),
+            deferredQueueRevision: this.deferredSynchronizationQueueRevision,
             deferredRecoveryActive: Boolean(this.deferredSynchronizationRecovery),
             deferredRetryDeadline: this.deferredSynchronizationRetryDeadline
                 ? new Date(this.deferredSynchronizationRetryDeadline).toISOString()
@@ -1077,13 +1141,97 @@ export class VirtualFileSystem extends vscode.Disposable {
         return {
             deferredOperationCount: queuedOperationKinds.length,
             deferredOperationKinds: Array.from(new Set(queuedOperationKinds)).sort(),
+            deferredOperationSample: this.summarizeDeferredOperationSample(this.deferredSynchronizationQueue.operations, 20),
             deferredOperationSummary: this.summarizeDeferredOperationCountsByKind(),
+            deferredQueueRevision: this.deferredSynchronizationQueueRevision,
             deferredRetryScheduled: Boolean(this.deferredSynchronizationRetryTimer),
             isOfflineMode: this.isOfflineMode,
             mode: this.deferredSynchronizationMode,
             offlineStatePersistScheduled: Boolean(this.offlineStatePersistTimer),
             queuedChatRetryScheduled: Boolean(this.queuedChatSynchronizationRetryTimer),
         };
+    }
+
+    private summarizeDeferredOperationForDiagnostics(operation: DeferredSyncOperation) {
+        const common = {
+            createdAt: operation.createdAt,
+            id: operation.id,
+            kind: operation.kind,
+        };
+        switch (operation.kind) {
+            case 'chat.send':
+                return {
+                    ...common,
+                    messageId: operation.payload.localMessageId,
+                };
+            case 'chat.edit':
+            case 'chat.delete':
+                return {
+                    ...common,
+                    messageId: operation.payload.messageId,
+                };
+            case 'comment.create':
+            case 'comment.anchorExistingThread':
+                return {
+                    ...common,
+                    docId: operation.payload.docId,
+                    filePath: operation.payload.filePath,
+                    messageId: operation.payload.localMessageId,
+                    threadId: operation.payload.threadId,
+                };
+            case 'comment.reply':
+                return {
+                    ...common,
+                    messageId: operation.payload.localMessageId,
+                    threadId: operation.payload.threadId,
+                };
+            case 'comment.edit':
+            case 'comment.deleteMessage':
+                return {
+                    ...common,
+                    messageId: operation.payload.messageId,
+                    threadId: operation.payload.threadId,
+                };
+            case 'comment.deleteThread':
+                return {
+                    ...common,
+                    docId: operation.payload.docId,
+                    threadId: operation.payload.threadId,
+                };
+            case 'comment.resolveThread':
+                return {
+                    ...common,
+                    docId: operation.payload.docId,
+                    resolved: operation.payload.resolved,
+                    threadId: operation.payload.threadId,
+                };
+            case 'file.localReplicaChange':
+                return {
+                    ...common,
+                    changeType: operation.payload.changeType,
+                    relPath: operation.payload.relPath,
+                };
+            case 'settings.update':
+                return {
+                    ...common,
+                    settingKeys: Object.keys(operation.payload.setting).sort(),
+                };
+        }
+    }
+
+    private summarizeDeferredOperationSample(
+        operations: readonly DeferredSyncOperation[],
+        limit: number,
+    ) {
+        return [...operations]
+            .sort((left, right) => {
+                if (left.createdAt===right.createdAt) {
+                    return left.id.localeCompare(right.id);
+                }
+                return left.createdAt.localeCompare(right.createdAt);
+            })
+            .slice(0, limit)
+            .map((operation) => this.summarizeDeferredOperationForDiagnostics(operation));
     }
 
     private summarizeDeferredOperationCountsByKind(
@@ -1097,6 +1245,27 @@ export class VirtualFileSystem extends vscode.Disposable {
             Array.from(counts.entries())
                 .sort(([left], [right]) => left.localeCompare(right)),
         );
+    }
+
+    private logDeferredSynchronizationQueueTransition(
+        action: string,
+        reason: string,
+        previousOperations: readonly DeferredSyncOperation[],
+        nextOperations: readonly DeferredSyncOperation[],
+        fields: Record<string, unknown> = {},
+    ) {
+        this.deferredSynchronizationQueueRevision += 1;
+        this.logDiagnostic('offline.queue_transition', {
+            action,
+            nextOperationCount: nextOperations.length,
+            nextOperationCountsByKind: this.summarizeDeferredOperationCountsByKind(nextOperations),
+            previousOperationCount: previousOperations.length,
+            previousOperationCountsByKind: this.summarizeDeferredOperationCountsByKind(previousOperations),
+            queueRevision: this.deferredSynchronizationQueueRevision,
+            reason,
+            sampleOperations: this.summarizeDeferredOperationSample(nextOperations, 10),
+            ...fields,
+        });
     }
 
     private summarizeDiagnosticValueCounts(values: string[]) {
@@ -1697,7 +1866,7 @@ export class VirtualFileSystem extends vscode.Disposable {
 
     private scheduleOfflineProjectStatePersist(reason: string) {
         if (this.offlineStatePersistTimer) {
-            clearTimeout(this.offlineStatePersistTimer);
+            return;
         }
         this.offlineStatePersistTimer = setTimeout(() => {
             this.offlineStatePersistTimer = undefined;
@@ -1717,10 +1886,10 @@ export class VirtualFileSystem extends vscode.Disposable {
                 .catch((error) => {
                     this.logDiagnostic('offline.state_persist_failed', {reason}, error);
                 });
-        }, 100);
+        }, 1000);
     }
 
-    private async flushOfflineProjectStatePersist() {
+    public async flushOfflineProjectStatePersist() {
         if (this.offlineStatePersistTimer) {
             clearTimeout(this.offlineStatePersistTimer);
             this.offlineStatePersistTimer = undefined;
@@ -1733,12 +1902,17 @@ export class VirtualFileSystem extends vscode.Disposable {
             }
         }
         await this.offlineStatePersistPromise;
+        await this.draftWrites?.idle();
+        await this.offlineStore.flush();
     }
 
     private async loadDeferredSynchronizationQueue() {
         this.deferredSynchronizationQueue = await this.offlineStore.loadOperationQueue();
+        this.deferredSynchronizationQueueRevision += 1;
         this.logDiagnostic('offline.queue_loaded', {
             operationCount: this.deferredSynchronizationQueue.operations.length,
+            operationCountsByKind: this.summarizeDeferredOperationCountsByKind(),
+            queueRevision: this.deferredSynchronizationQueueRevision,
         });
     }
 
@@ -1771,12 +1945,22 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     private async appendDeferredSynchronizationOperation(operation: DeferredSyncOperation, reason: string) {
+        const previousOperations = this.deferredSynchronizationQueue.operations;
         this.deferredSynchronizationQueue = appendDeferredSyncOperation(this.deferredSynchronizationQueue, operation);
+        this.logDeferredSynchronizationQueueTransition('append', reason, previousOperations, this.deferredSynchronizationQueue.operations, {
+            operationId: operation.id,
+            operationKind: operation.kind,
+        });
         await this.persistDeferredSynchronizationQueue(reason);
     }
 
     private async removeDeferredSynchronizationOperation(operationId: string, reason: string) {
+        const previousOperations = this.deferredSynchronizationQueue.operations;
         this.deferredSynchronizationQueue = removeDeferredSyncOperation(this.deferredSynchronizationQueue, operationId);
+        this.logDeferredSynchronizationQueueTransition('remove', reason, previousOperations, this.deferredSynchronizationQueue.operations, {
+            operationId,
+            removed: previousOperations.some((operation) => operation.id===operationId),
+        });
         await this.persistDeferredSynchronizationQueue(reason);
     }
 
@@ -1784,9 +1968,11 @@ export class VirtualFileSystem extends vscode.Disposable {
         reason: string,
         updater: (operations: DeferredSyncOperation[]) => DeferredSyncOperation[],
     ) {
+        const previousOperations = this.deferredSynchronizationQueue.operations;
         this.deferredSynchronizationQueue = createDeferredSyncQueueState(
             updater([...this.deferredSynchronizationQueue.operations]),
         );
+        this.logDeferredSynchronizationQueueTransition('replace', reason, previousOperations, this.deferredSynchronizationQueue.operations);
         await this.persistDeferredSynchronizationQueue(reason);
     }
 
@@ -1796,12 +1982,18 @@ export class VirtualFileSystem extends vscode.Disposable {
         nextMessageId: string,
         reason: string,
     ) {
+        const previousOperations = this.deferredSynchronizationQueue.operations;
         this.deferredSynchronizationQueue = replaceDeferredSyncMessageId(
             this.deferredSynchronizationQueue,
             threadId,
             previousMessageId,
             nextMessageId,
         );
+        this.logDeferredSynchronizationQueueTransition('replace_message_id', reason, previousOperations, this.deferredSynchronizationQueue.operations, {
+            nextMessageId,
+            previousMessageId,
+            threadId,
+        });
         await this.persistDeferredSynchronizationQueue(reason);
     }
 
@@ -1823,7 +2015,12 @@ export class VirtualFileSystem extends vscode.Disposable {
         if (!folded.merged) {
             return false;
         }
+        const previousOperations = this.deferredSynchronizationQueue.operations;
         this.deferredSynchronizationQueue = folded.state;
+        this.logDeferredSynchronizationQueueTransition('fold_comment_edit', reason, previousOperations, this.deferredSynchronizationQueue.operations, {
+            messageId,
+            threadId,
+        });
         await this.persistDeferredSynchronizationQueue(reason);
         this.logDiagnostic('comments.pending_message_edit_folded_into_deferred_message_operation', {
             contentLength: content.length,
@@ -2267,8 +2464,14 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     private async getAuthenticatedTransportIdentity(reason: string): Promise<Identity> {
-        const persistedIdentity = await GlobalStateManager.authenticate(this.context, this.serverName)
+        const assertActive = () => {
+            if (this.disposed) { throw new Error('The project session has ended. Sign in and reopen the project.'); }
+            GlobalStateManager.assertActiveServerSession(this.context, this.serverName, this.userId);
+        };
+        assertActive();
+        const persistedIdentity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId)
             .catch(() => undefined);
+        assertActive();
         const liveIdentity = this.socket.currentIdentity;
         const effectiveIdentity = resolvePreferredRealtimeIdentity(liveIdentity, persistedIdentity);
         if (!effectiveIdentity) {
@@ -2276,11 +2479,13 @@ export class VirtualFileSystem extends vscode.Disposable {
         }
 
         if (shouldPersistRealtimeIdentity(liveIdentity, persistedIdentity)) {
-            await GlobalStateManager.updateServerIdentity(this.context, this.serverName, effectiveIdentity);
+            await GlobalStateManager.updateServerIdentity(this.context, this.serverName, effectiveIdentity, this.userId);
             this.logDiagnostic('session.identity_persisted_from_socket', {
                 reason,
             });
         }
+
+        assertActive();
 
         this.logDiagnostic('session.identity_resolved', {
             reason,
@@ -2701,6 +2906,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             reason,
             relPath: normalizedRelPath,
         });
+        const previousOperations = this.deferredSynchronizationQueue.operations;
         const nextOperations = this.deferredSynchronizationQueue.operations.filter((operation) => {
             return operation.kind!=='file.localReplicaChange'
                 || operation.payload.relPath!==normalizedRelPath;
@@ -2717,6 +2923,11 @@ export class VirtualFileSystem extends vscode.Disposable {
                 },
             },
         ]);
+        this.logDeferredSynchronizationQueueTransition('record_local_replica_change', reason, previousOperations, this.deferredSynchronizationQueue.operations, {
+            changeType,
+            dedupedExistingPath: nextOperations.length!==previousOperations.length,
+            relPath: normalizedRelPath,
+        });
         await this.persistDeferredSynchronizationQueue(reason);
     }
 
@@ -2747,6 +2958,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             reason,
             requestedPaths,
         });
+        const previousOperations = this.deferredSynchronizationQueue.operations;
         this.deferredSynchronizationQueue = createDeferredSyncQueueState(
             this.deferredSynchronizationQueue.operations.filter((operation) => {
                 if (operation.kind!=='file.localReplicaChange') {
@@ -2755,6 +2967,10 @@ export class VirtualFileSystem extends vscode.Disposable {
                 return !targetPaths.has(this.normalizeDeferredLocalReplicaRelPath(operation.payload.relPath));
             }),
         );
+        this.logDeferredSynchronizationQueueTransition('acknowledge_local_replica', reason, previousOperations, this.deferredSynchronizationQueue.operations, {
+            acknowledgedPathCount: acknowledgedPaths.length,
+            requestedPathCount: requestedPaths.length,
+        });
         await this.persistDeferredSynchronizationQueue(reason);
         if (!this.hasDeferredSynchronizationOperations) {
             this.setDeferredSynchronizationMode('online', reason, {
@@ -3386,7 +3602,12 @@ export class VirtualFileSystem extends vscode.Disposable {
         if (!workspace) {
             return undefined;
         }
-        const fileUri = vscode.Uri.joinPath(workspace.workspaceRoot, ...pathname.split('/').filter(Boolean));
+        const pathSegments = splitSafeProjectPath(pathname);
+        if (pathSegments === undefined) {
+            this.logDiagnostic('offline.workspace_file_read_rejected', {pathname});
+            return undefined;
+        }
+        const fileUri = vscode.Uri.joinPath(workspace.workspaceRoot, ...pathSegments);
         try {
             return await vscode.workspace.fs.readFile(fileUri);
         } catch {
@@ -3497,7 +3718,168 @@ export class VirtualFileSystem extends vscode.Disposable {
                 reason,
             });
         }
+        this.removeCommentThreadsForDeletedAnchorText(
+            docId,
+            transformed.removedThreadIds,
+            `${reason}_anchor_text_deleted`,
+        );
         this.setCommentRanges(docId, transformed.ranges, reason);
+    }
+
+    private getCanonicalCommentThreadIds(threadIds: readonly string[]) {
+        return Array.from(new Set(
+            threadIds
+                .filter((threadId) => typeof threadId === 'string' && threadId.length > 0)
+                .map((threadId) => this.resolveCanonicalCommentThreadId(threadId)),
+        ));
+    }
+
+    private operationTargetsCommentThread(operation: DeferredSyncOperation, threadId: string) {
+        if (!('threadId' in operation.payload)) {
+            return false;
+        }
+        return this.resolveCanonicalCommentThreadId(operation.payload.threadId)===threadId;
+    }
+
+    private async pruneDeferredCommentOperationsForAnchorDeletion(threadId: string, reason: string) {
+        const previousOperations = this.deferredSynchronizationQueue.operations;
+        const matchingOperations = previousOperations.filter((operation) => {
+            return this.operationTargetsCommentThread(operation, threadId);
+        });
+        const hadPendingCreate = matchingOperations.some((operation) => {
+            return operation.kind==='comment.create' || operation.kind==='comment.anchorExistingThread';
+        });
+        const hadPendingDeleteThread = matchingOperations.some((operation) => operation.kind==='comment.deleteThread');
+        const removableKinds = new Set<DeferredSyncOperation['kind']>([
+            'comment.create',
+            'comment.anchorExistingThread',
+            'comment.reply',
+            'comment.edit',
+            'comment.deleteMessage',
+            'comment.resolveThread',
+        ]);
+        const removedKinds = matchingOperations
+            .filter((operation) => {
+                return removableKinds.has(operation.kind) || (hadPendingCreate && operation.kind==='comment.deleteThread');
+            })
+            .map((operation) => operation.kind);
+
+        if (removedKinds.length===0) {
+            return {
+                hadPendingCreate,
+                hadPendingDeleteThread,
+                removedKinds,
+            };
+        }
+
+        await this.replaceDeferredSynchronizationOperations(reason, (operations) => {
+            return operations.filter((operation) => {
+                if (!this.operationTargetsCommentThread(operation, threadId)) {
+                    return true;
+                }
+                if (hadPendingCreate && operation.kind==='comment.deleteThread') {
+                    return false;
+                }
+                return !removableKinds.has(operation.kind);
+            });
+        });
+        return {
+            hadPendingCreate,
+            hadPendingDeleteThread,
+            removedKinds,
+        };
+    }
+
+    private async persistCommentThreadAnchorDeletion(docId: string, threadId: string, reason: string) {
+        const pruned = await this.pruneDeferredCommentOperationsForAnchorDeletion(
+            threadId,
+            `${reason}_queued_operations_pruned`,
+        );
+        if (pruned.hadPendingCreate) {
+            this.logDiagnostic('comments.anchor_deleted_pending_create_cancelled', {
+                docId,
+                removedQueuedOperationCount: pruned.removedKinds.length,
+                removedQueuedOperationKinds: pruned.removedKinds,
+                threadId,
+            });
+            return;
+        }
+        if (pruned.hadPendingDeleteThread) {
+            this.logDiagnostic('comments.anchor_deleted_delete_already_queued', {
+                docId,
+                threadId,
+            });
+            return;
+        }
+        if (this.isOfflineMode) {
+            await this.appendDeferredSynchronizationOperation({
+                createdAt: new Date().toISOString(),
+                id: `offline-op-${uuidv4()}`,
+                kind: 'comment.deleteThread',
+                payload: {
+                    docId,
+                    threadId,
+                },
+            }, `${reason}_queued`);
+            return;
+        }
+
+        try {
+            const identity = await this.getAuthenticatedTransportIdentity(`${reason}_delete_thread`);
+            const response = await this.api.deleteCommentThread(identity, this.projectId, docId, threadId);
+            if (response.type!=='success') {
+                throw new Error(response.message ?? 'Unable to delete the comment thread after its anchor text was removed');
+            }
+            this.logDiagnostic('comments.anchor_deleted_thread_delete_persisted', {
+                docId,
+                threadId,
+            });
+        } catch (error) {
+            if (shouldTreatCommentMutationFailureAsTransient(error)) {
+                await this.transitionToOfflineMode(`${reason}_connectivity_failure`, error, {
+                    docId,
+                    threadId,
+                });
+                await this.appendDeferredSynchronizationOperation({
+                    createdAt: new Date().toISOString(),
+                    id: `offline-op-${uuidv4()}`,
+                    kind: 'comment.deleteThread',
+                    payload: {
+                        docId,
+                        threadId,
+                    },
+                }, `${reason}_queued_after_connectivity_failure`);
+                return;
+            }
+            this.logDiagnostic('comments.anchor_deleted_thread_delete_failed', {
+                docId,
+                threadId,
+            }, error);
+        }
+    }
+
+    private removeCommentThreadsForDeletedAnchorText(docId: string, threadIds: readonly string[], reason: string) {
+        const canonicalThreadIds = this.getCanonicalCommentThreadIds(threadIds);
+        if (canonicalThreadIds.length===0) {
+            return;
+        }
+        canonicalThreadIds.forEach((threadId) => {
+            this.removeCommentThread(threadId, reason);
+        });
+        void Promise.all(canonicalThreadIds.map((threadId) => {
+            return this.persistCommentThreadAnchorDeletion(docId, threadId, reason);
+        })).catch((error) => {
+            this.logDiagnostic('comments.anchor_deleted_thread_delete_sync_failed', {
+                docId,
+                threadCount: canonicalThreadIds.length,
+                threadIds: canonicalThreadIds,
+            }, error);
+        });
+        this.logDiagnostic('comments.anchor_deleted_threads_removed_locally', {
+            docId,
+            threadCount: canonicalThreadIds.length,
+            threadIds: canonicalThreadIds,
+        });
     }
 
     public async applyLocalTextDocumentChangesToCommentRanges(
@@ -3860,7 +4242,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             operationId: operation.id,
             threadId: replayThreadId,
         });
-        await this.socket.applyOtUpdate(payload.docId, update);
+        await this.applyConfirmedCommentUpdate(docEntity, update);
         const confirmedThreadId = await this.waitForCommentAnchorPersistedOnServer({
             docId: payload.docId,
             filePath: payload.filePath,
@@ -3877,7 +4259,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             throw new Error('Timed out waiting for the replayed comment anchor to appear in the Overleaf document state.');
         }
         if (docEntity) {
-            docEntity.lastVersion = docEntity.version;
+            docEntity.lastVersion = currentVersion;
         }
         this.logCommentSyncDiagnostic('comments.replay_create_anchor_apply_completed', {
             currentVersion: docEntity?.version ?? currentVersion,
@@ -4218,10 +4600,12 @@ export class VirtualFileSystem extends vscode.Disposable {
         if (this.commentThreadsLoading && !force) {
             return this.commentThreadsLoading;
         }
-        this.commentThreadsLoading = (async () => {
-            const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const requestSequence = ++this.commentThreadsFetchSequence;
+        const loadingPromise = (async () => {
+            const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
             this.logDiagnostic('comments.fetch_started');
             const existingThreads = new Map(this.commentThreads);
+            const fetchSequence = this.commentsChangedEventSequence;
             const existingThreadCount = existingThreads.size;
             const shouldPreserveLocalThreads = existingThreads.size > 0
                 && (this.isRecoveryInProgress()
@@ -4229,11 +4613,22 @@ export class VirtualFileSystem extends vscode.Disposable {
                     || this.connectionPhase!=='live'
                     || this.hasDeferredRecoverableNonChatOperations);
             const response = await this.api.getCommentThreads(identity, this.projectId);
+            if (requestSequence!==this.commentThreadsFetchSequence) {
+                this.logDiagnostic('comments.fetch_superseded_by_newer_fetch');
+                return;
+            }
             if (response.type!=='success' || !response.commentThreads) {
                 this.logDiagnostic('comments.fetch_failed', {
                     responseType: response.type,
                 }, response.message);
                 throw new Error(response.message ?? 'Unable to fetch comment threads');
+            }
+            if (fetchSequence!==this.commentsChangedEventSequence) {
+                // A local mutation or realtime event supersedes this snapshot.
+                // In particular, a response begun before DELETE must not
+                // resurrect the deleted thread or erase a new reply.
+                this.logDiagnostic('comments.fetch_superseded_by_mutation');
+                return;
             }
             const fetchedThreadIds = Object.keys(response.commentThreads);
             if (fetchedThreadIds.length===0
@@ -4281,9 +4676,12 @@ export class VirtualFileSystem extends vscode.Disposable {
                 });
             }
         })().finally(() => {
-            this.commentThreadsLoading = undefined;
+            if (this.commentThreadsLoading===loadingPromise) {
+                this.commentThreadsLoading = undefined;
+            }
         });
-        return this.commentThreadsLoading;
+        this.commentThreadsLoading = loadingPromise;
+        return loadingPromise;
     }
 
     private async ensureCommentRangesLoaded(uri: vscode.Uri, doc: DocumentEntity) {
@@ -4647,12 +5045,32 @@ export class VirtualFileSystem extends vscode.Disposable {
             persistState?: boolean,
         } = {},
     ) {
+        const previousVersion = doc.version;
         const joinResponse = await this.socket.joinDoc(doc._id);
         const content = joinResponse.docLines.join('\n');
+        if (previousVersion!==undefined && joinResponse.version < previousVersion) {
+            throw new Error('Stale document join revision; recovery required');
+        }
+        const record = await this.getDocumentSyncRecord(this.toDocumentSyncRelPathFromProjectPath(resolvedPath));
+        const draft = record?.localDirty && record.localBlobId ? await this.readDocumentSyncBlob(record.localBlobId) : undefined;
+        if (record?.localDirty && record.localBlobId && !draft) {
+            throw new Error('A pending document recovery blob is missing; preserve the journal before continuing');
+        }
+        const base = record?.baseBlobId ? await this.readDocumentSyncBlob(record.baseBlobId) : undefined;
+        const restored = resolveJoinedDocumentTextState({
+            joinedText: content,
+            localText: options.localTextOverride ?? (draft ? new TextDecoder().decode(draft) : doc.localCache),
+            remoteText: draft && base ? new TextDecoder().decode(base) : doc.remoteCache,
+        });
+        if (doc.version!==previousVersion) { throw new Error('Document advanced during join; retry recovery'); }
         doc.version = joinResponse.version;
         doc.lastVersion = undefined;
-        doc.localCache = options.localTextOverride ?? content;
+        doc.localCache = restored.nextLocalText;
         doc.remoteCache = content;
+        doc.recoveryRequired = restored.recoveryRequired;
+        if (this.isInvisibleMode && restored.nextLocalText!==content && !restored.recoveryRequired) {
+            await this.socket.restorePendingAlternativeDocument(doc._id);
+        }
         const mergedHydratedRanges = this.mergeHydratedCommentRangesWithPendingCreates(
             doc._id,
             normalizeCommentRanges(joinResponse.ranges?.comments),
@@ -4742,11 +5160,17 @@ export class VirtualFileSystem extends vscode.Disposable {
         return {
             docId: doc._id,
             loadedFromCache,
+            recoveryRequired: doc.recoveryRequired,
             localText: doc.localCache ?? '',
             overleafUri: this.pathToUri(resolvedPath),
             remoteText: doc.remoteCache ?? '',
             version: doc.version ?? 0,
         };
+    }
+
+    public getTextDocumentRemoteVersion(docId: string): number | undefined {
+        const resolved = this._resolveById(docId);
+        return resolved?.fileType==='doc' ? (resolved.fileEntity as DocumentEntity).version : undefined;
     }
 
     public async refreshTextDocumentSessionFromServer(
@@ -4780,6 +5204,7 @@ export class VirtualFileSystem extends vscode.Disposable {
         return {
             docId: refreshed.doc._id,
             loadedFromCache: false,
+            recoveryRequired: refreshed.doc.recoveryRequired,
             localText: refreshed.doc.localCache ?? '',
             overleafUri: this.pathToUri(refreshed.resolvedPath),
             remoteText: refreshed.doc.remoteCache ?? '',
@@ -4787,13 +5212,36 @@ export class VirtualFileSystem extends vscode.Disposable {
         };
     }
 
+    public async persistTextDocumentDraft(uri: vscode.Uri, localText: string, baseText: string) {
+        if (localText===baseText) { return; }
+        this.draftWrites ??= new AsyncQueue();
+        return this.draftWrites.run(async () => {
+            const relPath = this.toDocumentSyncRelPath(uri);
+            const localBlobId = await this.writeDocumentSyncBlob(Buffer.from(localText));
+            const baseBlobId = await this.writeDocumentSyncBlob(Buffer.from(baseText));
+            await this.updateDocumentSyncState('document_draft_persisted', {relPath}, state => {
+                const existing = state.records[relPath];
+                state.records[relPath] = {
+                    ...existing, relPath, localDirty: true, localBlobId,
+                    baseBlobId: existing?.localDirty && existing.baseBlobId ? existing.baseBlobId : baseBlobId,
+                };
+            });
+        });
+    }
+
     public async pushTextDocumentChanges(
         uri: vscode.Uri,
         localText: string,
         reason: string,
+        expectedRemoteText?: string,
     ): Promise<LiveTextDocumentSyncResult> {
+        if (this.disposed) { return {kind: 'offline'}; }
         const {doc, resolvedPath} = await this.ensureDocumentTextInitialized(uri);
+        if (doc.recoveryRequired) { return {kind: 'recovery-required'}; }
         const remoteText = doc.remoteCache ?? '';
+        if (expectedRemoteText!==undefined && remoteText!==expectedRemoteText) {
+            return {kind: 'recovery-required'};
+        }
         const remoteTextContent = new TextEncoder().encode(remoteText);
         const localTextContent = new TextEncoder().encode(localText);
         const op = buildTextOperations(remoteText, localText);
@@ -4810,6 +5258,20 @@ export class VirtualFileSystem extends vscode.Disposable {
         }
 
         const currentVersion = doc.version ?? 0;
+        // Preserve the unconfirmed local text before it leaves this process.
+        doc.localCache = localText;
+        await this.persistTextDocumentDraft(uri, localText, remoteText);
+        await this.markDocumentSyncDirty({
+            baseContent: remoteTextContent, baseVersion: currentVersion, docId: doc._id,
+            lastKnownRemoteContent: remoteTextContent, lastKnownRemoteVersion: currentVersion,
+            reason, relPath: this.toDocumentSyncRelPathFromProjectPath(resolvedPath),
+        });
+        // Disk checkpoints yield to incoming operations. Do not submit an OT
+        // calculated against a base that changed while its draft was persisted.
+        if (this.disposed || doc.recoveryRequired || doc.version!==currentVersion || doc.remoteCache!==remoteText) {
+            await this.requestRealtimeRecovery('document_version_mismatch');
+            return {kind: 'recovery-required'};
+        }
         const update: UpdateSchema = {
             doc: doc._id,
             lastV: doc.lastVersion,
@@ -4821,7 +5283,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             await this.socket.applyOtUpdate(doc._id, update);
         } catch (error) {
             if (isLikelyConnectivityFailure(error)) {
-                doc.localCache = localText;
+                if (doc.localCache===remoteText || doc.localCache===localText) { doc.localCache = localText; }
                 await this.markDocumentSyncDirty({
                     baseContent: remoteTextContent,
                     baseVersion: currentVersion,
@@ -4844,13 +5306,26 @@ export class VirtualFileSystem extends vscode.Disposable {
                 reason,
                 version: currentVersion,
             }, error);
+            await this.requestRealtimeRecovery('document_version_mismatch');
             return {kind: 'recovery-required'};
         }
 
+        if (this.isInvisibleMode) {
+            this.scheduleOfflineProjectStatePersist(`${reason}_alternative_buffered`);
+            return {kind: 'queued'};
+        }
+        if (doc.version!==currentVersion || doc.remoteCache!==remoteText) {
+            // A collaborator or rejoin advanced the base during this submission.
+            // Keep both snapshots and recover; never roll the revision backward.
+            await this.requestRealtimeRecovery('document_version_mismatch');
+            return {kind: 'recovery-required'};
+        }
         this.rememberPendingLocalTextEcho(doc._id, currentVersion, op);
         doc.lastVersion = currentVersion;
         doc.version = currentVersion + 1;
-        doc.localCache = localText;
+        // A newer local draft may have arrived while the acknowledgement was
+        // pending. It must remain visible after this older submission commits.
+        if (doc.localCache===remoteText || doc.localCache===localText) { doc.localCache = localText; }
         doc.remoteCache = localText;
         this.isDirty = true;
         this.scheduleOfflineProjectStatePersist(reason);
@@ -4871,6 +5346,21 @@ export class VirtualFileSystem extends vscode.Disposable {
         return {kind: 'applied'};
     }
 
+    private async applyConfirmedCommentUpdate(doc: DocumentEntity | undefined, update: UpdateSchema) {
+        if (!doc) { throw new Error('Comment document is unavailable'); }
+        await this.socket.applyOtUpdate(doc._id, update);
+        // Version-only sender acknowledgements do not pass through remoteWatch.
+        // Comment anchors advance the same revision stream as text operations.
+        if (doc.version===update.v) {
+            doc.lastVersion = update.v;
+            doc.version = update.v + 1;
+            this.scheduleOfflineProjectStatePersist('comment_anchor_confirmed');
+        } else {
+            await this.requestRealtimeRecovery('document_version_mismatch');
+            throw new Error('Document advanced during comment submission; recovery required');
+        }
+    }
+
     public acceptRemoteTextUpdate(
         docId: string,
         nextRemoteText: string,
@@ -4883,6 +5373,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             return;
         }
         const doc = resolved.fileEntity as DocumentEntity;
+        if (doc.version!==undefined && nextVersion < doc.version) { return; }
         doc.localCache = nextLocalText;
         doc.remoteCache = nextRemoteText;
         doc.version = nextVersion;
@@ -4921,6 +5412,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     public async requestRealtimeRecovery(reason: InitializationReason = 'document_version_mismatch') {
+        if (this.disposed) { return; }
         this.pendingRecoveryReason = reason;
         this.scheduleRecovery(reason);
     }
@@ -4941,6 +5433,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     }): Promise<ProjectEntity> {
         this.bootstrapAttemptId += 1;
         const bootstrapAttemptId = this.bootstrapAttemptId;
+        if (this.pendingRecoveryReason===reason) { this.pendingRecoveryReason = undefined; }
         const previousRoot = this.root;
         const previousBootstrapSource = this.bootstrapSource;
         const previousReadonlyMode = this.readonlyMode;
@@ -4972,15 +5465,25 @@ export class VirtualFileSystem extends vscode.Disposable {
             reason,
         });
 
+        let initializationFailed = false;
         const initializationPromise = this.loadDeferredSynchronizationQueue()
             .then(async () => {
                 if (!options.preserveRoot) {
                     await this.restorePersistedChatStateForInitialization();
                 }
             })
-            .then(() => this.bootstrapProject(options.allowFallback))
-            .then((project) => this.finishInitialization(project, reason, options.autoCompileAfterInitialization))
+            .then(() => {
+                this.assertSessionNotDisposed();
+                return this.bootstrapProject(options.allowFallback);
+            })
+            .then((project) => {
+                this.assertSessionNotDisposed();
+                return this.finishInitialization(project, reason, options.autoCompileAfterInitialization);
+            })
             .catch((error) => {
+                initializationFailed = true;
+                if (this.disposed) { throw error; }
+                if (options.preserveRoot) { this.retryConnection += 1; }
                 this.logDiagnostic('init.failed', {
                     allowFallback: options.allowFallback,
                     autoCompileAfterInitialization: options.autoCompileAfterInitialization,
@@ -5014,27 +5517,33 @@ export class VirtualFileSystem extends vscode.Disposable {
                 throw error;
         });
         const trackedPromise = initializationPromise.finally(() => {
-            if (this.initializing===trackedPromise) {
-                this.initializing = undefined;
-            }
-            // Offline bootstraps can legitimately finish with the cached project
-            // while a follow-up recovery request was queued mid-flight. Once the
-            // current attempt is fully released, restart the recovery timer so
-            // reconnect detection continues without requiring user action.
-            if (this.deferredSynchronizationMode==='offline' && !this.recoveryTimer) {
-                const queuedRecoveryReason = this.pendingRecoveryReason ?? 'socket_disconnect';
-                this.pendingRecoveryReason = undefined;
+            if (this.initializing!==trackedPromise) { return; }
+            this.initializing = undefined;
+            if (this.disposed) { return; }
+            const queuedReason = this.pendingRecoveryReason;
+            this.pendingRecoveryReason = undefined;
+            // A disconnect while bootstrap is in flight has no timer yet. Once
+            // the owner releases that attempt, recover even if cached state is
+            // still marked online. A later successful transport clears old drops.
+            const needsRecovery = this.deferredSynchronizationMode==='offline'
+                || Boolean(this.root && initializationFailed && options.preserveRoot)
+                || Boolean(this.root && !this.socket.isConnected && !this.readonlyMode
+                    && !this.socket.isUsingAlternativeConnectionScheme)
+                || Boolean(queuedReason && queuedReason!=='socket_disconnect');
+            if (needsRecovery && !this.recoveryTimer) {
+                const nextReason = queuedReason ?? 'socket_disconnect';
                 this.logDiagnostic('recovery.rescheduled_after_initialization', {
-                    queuedRecoveryReason,
+                    queuedRecoveryReason: nextReason,
                     reason,
                 });
-                this.scheduleRecovery(queuedRecoveryReason);
+                this.scheduleRecovery(nextReason);
             }
         });
         return trackedPromise;
     }
 
     private scheduleRecovery(reason: InitializationReason) {
+        if (this.disposed) { return; }
         if (this.recoveryTimer) {
             this.logDiagnostic('recovery.already_scheduled', {
                 delayMs: calculateRecoveryDelayMs(this.retryConnection),
@@ -5062,6 +5571,7 @@ export class VirtualFileSystem extends vscode.Disposable {
         });
         this.recoveryTimer = setTimeout(() => {
             this.recoveryTimer = undefined;
+            if (this.disposed) { return; }
             this.logDiagnostic('recovery.started', {
                 delayMs,
                 reason,
@@ -5088,10 +5598,9 @@ export class VirtualFileSystem extends vscode.Disposable {
                         reason,
                         recoveryAttemptId,
                     }, error);
-                    if (reason==='socket_disconnect') {
-                        this.retryConnection += 1;
-                    }
-                    setTimeout(() => this.scheduleRecovery(reason), 0);
+                    // The initialization owner reschedules after releasing its
+                    // promise; no untracked zero-delay timer can revive disposal.
+                    if (!this.disposed && !this.recoveryTimer) { this.scheduleRecovery(reason); }
                     // Recovery runs in the background. Keep failures in
                     // diagnostics and reschedule silently instead of surfacing
                     // them as unhandled background errors.
@@ -5106,7 +5615,14 @@ export class VirtualFileSystem extends vscode.Disposable {
         }
     }
 
+    private assertSessionNotDisposed() {
+        if (this.disposed) {
+            throw vscode.FileSystemError.Unavailable('The project session has ended; pending edits are retained.');
+        }
+    }
+
     private async bootstrapProject(allowFallback: boolean = true): Promise<ProjectEntity> {
+        this.assertSessionNotDisposed();
         this.ensureRemoteWatchRegistered();
         const bootstrapAttemptId = this.bootstrapAttemptId;
         this.logDiagnostic('bootstrap.start', {
@@ -5114,8 +5630,10 @@ export class VirtualFileSystem extends vscode.Disposable {
             bootstrapAttemptId,
         });
         try {
-            const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+            const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
+            this.assertSessionNotDisposed();
             const pageMetadata = await this.api.getProjectPageMetadata(identity, this.projectId);
+            this.assertSessionNotDisposed();
             this.logDiagnostic('bootstrap.metadata_loaded', {
                 bootstrapAttemptId,
                 pageProjectName: pageMetadata.projectName,
@@ -5166,6 +5684,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             }
         } catch (error) {
             this.logDiagnostic('bootstrap.failed', {bootstrapAttemptId}, error);
+            this.assertSessionNotDisposed();
             const offlineProject = await this.loadOfflineProjectState(
                 isLikelyConnectivityFailure(error) ? 'bootstrap_offline_connectivity_failure' : 'bootstrap_offline_snapshot',
             );
@@ -5181,14 +5700,16 @@ export class VirtualFileSystem extends vscode.Disposable {
             bootstrapAttemptId: this.bootstrapAttemptId,
             wsUrl: wsUrl ?? '',
         });
+        this.assertSessionNotDisposed();
         this.socket.configureRealtimeConnection(wsUrl);
         await this.socket.prepareForJoin();
+        this.assertSessionNotDisposed();
         const project = await this.socket.joinProject(this.projectId);
+        this.assertSessionNotDisposed();
         project.settings = pageMetadata.settings;
         this.bootstrapSource = 'socket';
         this.permissionsLevel = this.socket.permissionsLevel ?? 'readAndWrite';
         this.readonlyMode = false;
-        this.retryConnection = 0;
         this.setConnectionPhase(resolveConnectedConnectionPhase({
             readonlyMode: this.readonlyMode,
             usingAlternativeConnectionScheme: this.socket.isUsingAlternativeConnectionScheme,
@@ -5245,10 +5766,15 @@ export class VirtualFileSystem extends vscode.Disposable {
             return this.chatViewProviderItem.provider;
         }
         const provider = new ChatViewProvider(this, this.context.extensionUri);
-        this.chatViewProviderItem = {
-            provider,
-            triggers: provider.triggers,
-        };
+        try {
+            this.chatViewProviderItem = {
+                provider,
+                triggers: provider.triggers,
+            };
+        } catch (error) {
+            provider.dispose();
+            throw error;
+        }
         return provider;
     }
 
@@ -5345,6 +5871,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     private ensureWritable() {
+        if (this.disposed) { throw vscode.FileSystemError.NoPermissions('The project session has ended. Sign in and reopen it before making remote changes.'); }
         if (!this.readonlyMode) {
             return;
         }
@@ -5544,7 +6071,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             return undefined;
         }
 
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
         const res = await this.api.getFileFromClsi(identity, matchedOutput.url, 'standard');
         if (res.type==='success' && res.content) {
             this.logDiagnostic('fallback.compiled_output_resolved', {
@@ -5637,6 +6164,10 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     async _resolveUri(uri: vscode.Uri) {
+        const scope = parseUri(uri);
+        if (scope.serverName!==this.serverName || scope.projectId!==this.projectId || scope.userId!==this.userId) {
+            throw vscode.FileSystemError.NoPermissions('The file belongs to a different project or account');
+        }
         // resolve path
         const [parentFolder, fileName] = await (async () => {
             const {pathParts} = parseUri(uri);
@@ -5756,7 +6287,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     private remoteWatch(): void {
         this.socket.updateEventHandlers({
             onDisconnected: () => {
-                if (this.root===undefined) { return; } // bypass the first initialization
+                if (this.disposed || this.root===undefined) { return; } // bypass the first initialization
                 const recoveryReason = this.pendingRecoveryReason ?? 'socket_disconnect';
                 this.pendingRecoveryReason = undefined;
                 this.logDiagnostic('socket.disconnected', {
@@ -5764,6 +6295,11 @@ export class VirtualFileSystem extends vscode.Disposable {
                     recoveryReason,
                 });
                 if (recoveryReason==='socket_disconnect') {
+                    // Short-lived reconnects must not repeatedly reset backoff.
+                    if (this.lastRealtimeConnectionAcceptedAtMs!==undefined
+                        && Date.now()-this.lastRealtimeConnectionAcceptedAtMs>=60000) {
+                        this.retryConnection = 0;
+                    }
                     this.retryConnection += 1;
                 }
                 this.setConnectionPhase('recovering', recoveryReason, {
@@ -5772,7 +6308,8 @@ export class VirtualFileSystem extends vscode.Disposable {
                 this.scheduleRecovery(recoveryReason);
             },
             onConnectionAccepted: (publicId:string) => {
-                this.retryConnection = 0;
+                if (this.disposed) { return; }
+                this.lastRealtimeConnectionAcceptedAtMs = Date.now();
                 this.publicId = publicId;
                 this.logDiagnostic('socket.connection_accepted', {
                     publicId,
@@ -5862,11 +6399,28 @@ export class VirtualFileSystem extends vscode.Disposable {
                 }
             },
             onFileChanged: (update:UpdateSchema) => {
+                if (!update || typeof update.doc!=='string') { return; }
                 const res = this._resolveById(update.doc);
                 if (res===undefined) { return; }
 
                 const doc = res.fileEntity as DocumentEntity;
-                const textOps = extractTextOperations(update.op);
+                let textOps: ReturnType<typeof extractTextOperations>;
+                let validatedText: string | undefined;
+                try {
+                    if (!Number.isSafeInteger(update.v) || update.v < 0) { throw new Error('Invalid document revision'); }
+                    textOps = extractTextOperations(update.op);
+                    if (update.v===doc.version && doc.remoteCache!==undefined) {
+                        validatedText = applyTextOperationsToString(doc.remoteCache, textOps);
+                    }
+                } catch (error) {
+                    this.logDiagnostic('text_document.invalid_update', {docId: doc._id}, error);
+                    void this.requestRealtimeRecovery('document_version_mismatch');
+                    return;
+                }
+                if (doc.version!==undefined && update.v < doc.version) {
+                    // Delayed or duplicate broadcasts cannot advance this state.
+                    return;
+                }
                 const commentOps = update.op?.filter((op) => op.c!==undefined);
                 this.discardStalePendingLocalTextEchoes(doc._id, update.v ?? 0);
                 if ((textOps?.length ?? 0) > 0 && this.consumePendingLocalTextEcho(doc._id, update.v ?? 0, textOps)) {
@@ -5884,11 +6438,12 @@ export class VirtualFileSystem extends vscode.Disposable {
                 if (update.v===doc.version) {
                     if (update.op && (textOps?.length ?? 0) > 0 && doc.remoteCache!==undefined) {
                         const previousRemoteText = doc.remoteCache;
-                        const content = applyTextOperationsToString(previousRemoteText, textOps);
-                        const _uri = this.pathToUri(res.path).toString();
-                        const _doc = vscode.workspace.textDocuments.find((doc) => doc.uri.toString()===_uri);
-                        // if doc dirty, local cache should diverge from remote cache
-                        if (_doc && !_doc.isDirty) {doc.localCache = content;}
+                        const content = validatedText!;
+                        // A saved editor can still have unconfirmed work. Only
+                        // replace the cached local side when its base matches.
+                        const localMerge = mergeRemoteTextIntoLocalText(previousRemoteText, content, doc.localCache ?? previousRemoteText);
+                        if (localMerge.kind==='merged') { doc.localCache = localMerge.mergedText; }
+                        else { doc.recoveryRequired = true; }
                         doc.remoteCache = content;
                         doc.version += 1;
                         this.isDirty = true;
@@ -5917,8 +6472,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                         incomingVersion: update.v ?? -1,
                         path: res.path,
                     });
-                    doc.remoteCache = undefined;
-                    doc.localCache = undefined;
+                    // Keep unconfirmed local work and its merge base for recovery.
                     void this.requestRealtimeRecovery('document_version_mismatch');
                 }
             },
@@ -6083,6 +6637,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                         });
                         doc.version = joinResponse.version;
                         doc.lastVersion = undefined;
+                        doc.recoveryRequired = joinedState.recoveryRequired;
                         doc.remoteCache = joinedState.nextRemoteText;
                         doc.localCache = joinedState.nextLocalText;
                         content = joinedState.contentToOpen;
@@ -6153,7 +6708,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                 }
 
                 const {doc: rehydratedDoc} = await this.rehydrateDocumentTextState(uri, 'file_open');
-                const content = rehydratedDoc.remoteCache ?? '';
+                const content = rehydratedDoc.localCache ?? rehydratedDoc.remoteCache ?? '';
                 this.logDiagnostic('file.open_doc_socket_join', {
                     charLength: content.length,
                     commentCount: this.commentRangesByDocId.get(rehydratedDoc._id)?.length ?? 0,
@@ -6166,7 +6721,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                 return new TextEncoder().encode(content);
             }
         } else if (fileType==='outputs') {
-            return GlobalStateManager.authenticate(this.context, this.serverName)
+            return GlobalStateManager.authenticate(this.context, this.serverName, this.userId)
             .then((identity) => {
                 return this.api.getFileFromClsi(identity, (fileEntity as OutputFileEntity).url, 'standard')
                 .then((res) => {
@@ -6217,7 +6772,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                     }),
                 );
             }
-            const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+            const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
             const res = await this.api.getFile(identity, this.projectId, fileId);
             if (res.type==='success' && res.content) {
                 this.logDiagnostic('file.open_file_api', {
@@ -6275,7 +6830,7 @@ export class VirtualFileSystem extends vscode.Disposable {
         }
 
         let res = undefined;
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
 
         if (content.length===0) {
             const _res = await this.api.addDoc(identity, this.projectId, parentFolder._id, fileName);
@@ -6327,7 +6882,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             }, async (progress, token) => {
                 token.onCancellationRequested(() => {});
                 
-                const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+                const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
                 const res = await (this.api as ExtendedBaseAPI).refreshLinkedFile(identity, this.projectId, fileEntity._id);
 
                 if (res.type==='success' && res.message!==undefined) {
@@ -6360,7 +6915,7 @@ export class VirtualFileSystem extends vscode.Disposable {
         });
 
         let provider = undefined, entityId = undefined, fileName = undefined, data = undefined;
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
         if (selection === vscode.l10n.t('From Another Project')) {
             provider = 'project_file';
             const allTags = (await this.api.getAllTags(identity)).tags || [];
@@ -6412,10 +6967,18 @@ export class VirtualFileSystem extends vscode.Disposable {
                 title: vscode.l10n.t('URL to fetch the file from'),
                 placeHolder: 'https://example.com/my-file.png',
                 ignoreFocusOut: true,
+                validateInput: (value) => {
+                    const validation = validateExternalLinkedFileUrl(value);
+                    return validation.ok ? undefined : formatExternalLinkedFileUrlValidationIssue(validation.issue);
+                },
             });
-            fileName = url && await vscode.window.showInputBox({
+            const validatedUrl = validateExternalLinkedFileUrl(url);
+            if (!validatedUrl.ok) {
+                return;
+            }
+            fileName = await vscode.window.showInputBox({
                 title: vscode.l10n.t('File Name In This Project'),
-                value: url?.split('/').pop(),
+                value: validatedUrl.suggestedFileName,
                 ignoreFocusOut: true,
                 validateInput: (value) => {
                     if (value==='' || value===undefined || value.match(/^[^\/?%*:|"<>]+$/g)===null) {
@@ -6425,8 +6988,11 @@ export class VirtualFileSystem extends vscode.Disposable {
                     }
                 }
             });
+            if (!fileName) {
+                return;
+            }
             //
-            data = {url:url!};
+            data = {url:validatedUrl.normalizedUrl};
             const res = await (this.api as ExtendedBaseAPI).createLinkedFile(identity, this.projectId, parentFolder._id, fileName!, provider, data);
             if (res.type==='success' && res.message!==undefined) {
                 entityId = res.message;
@@ -6452,6 +7018,7 @@ export class VirtualFileSystem extends vscode.Disposable {
         this.ensureWritable();
         const mutationAttemptId = this.nextMutationAttemptId();
         const {fileType, fileEntity} = await this._resolveUri(uri);
+        if (fileEntity && !overwrite) { throw vscode.FileSystemError.FileExists(uri); }
         this.logDiagnostic('mutation.write.start', {
             bytes: content.length,
             create,
@@ -6509,6 +7076,8 @@ export class VirtualFileSystem extends vscode.Disposable {
                     );
                 }
                 doc.localCache = _content;
+                if (doc.remoteCache===undefined) { throw vscode.FileSystemError.Unavailable('Document base is unavailable; save requires recovery'); }
+                await this.persistTextDocumentDraft(uri, _content, doc.remoteCache);
                 this.scheduleOfflineProjectStatePersist('save_bypassed_live_session');
                 this.logDiagnostic('legacy_conflict_skipped_live_managed', {
                     entityId: doc._id,
@@ -6575,91 +7144,15 @@ export class VirtualFileSystem extends vscode.Disposable {
                     }),
                 );
             }
-            const currentLocalCache: string = doc.localCache;
-            const currentRemoteCache: string = doc.remoteCache;
-            const currentVersion: number = doc.version;
-            const dmp = new DiffMatchPatch();
-            const patches = dmp.patch_make(currentLocalCache, currentRemoteCache);
-
-            const mergeResArray = dmp.patch_apply(patches, _content);
-            const mergeRes = mergeResArray[0] as string;
-            const patchResults = mergeResArray[1] as boolean[];
-            if (!allPatchApplicationsSucceeded(patchResults)) {
-                this.logDiagnostic('mutation.write.rejected', {
-                    entityId: doc._id,
-                    failedPatchCount: patchResults.filter(result => !result).length,
-                    mutationAttemptId,
-                    path: uri.path,
-                    reason: 'patch_apply_conflict',
-                    version: doc.version,
-                });
-                throw vscode.FileSystemError.Unavailable(
-                    vscode.l10n.t('Unable to safely save "{fileName}" because the remote document changed. Reopen the file and try again.', {
-                        fileName: fileEntity.name,
-                    }),
-                );
+            const merged = mergeRemoteTextIntoLocalText(doc.localCache, doc.remoteCache, _content);
+            if (merged.kind==='conflict') {
+                throw vscode.FileSystemError.Unavailable('Concurrent document changes require conflict resolution; local text was not overwritten.');
             }
-            const update: UpdateSchema = {
-                doc: doc._id,
-                lastV: doc.lastVersion,
-                v: currentVersion,
-                // Reference: services/web/frontend/js/vendor/libs/sharejs.js#L1288
-                hash: (()=>{
-                    if (!doc.mtime || Date.now()-doc.mtime>5000) {
-                        doc.mtime = Date.now();
-                        return require('crypto').createHash('sha1').update(
-                            "blob " + mergeRes.length + "\x00" + mergeRes
-                        ).digest('hex');
-                    }
-                })() as string,
-                op: (()=>{
-                    const remoteCacheAscii = Buffer.from(currentRemoteCache, 'utf-8').toString('utf-8');
-                    const mergeResAscii = Buffer.from(mergeRes, 'utf-8').toString('utf-8');
-                    let currentPos = 0;
-                    return dmp.diff_main(remoteCacheAscii, mergeResAscii)
-                                .map((part) => {
-                                    // part[0] === -1: delete, 0: equal, 1: insert; part[1]: compared content
-                                    const incCount = part[0] === -1 ? 0 : part[1].length;
-                                    currentPos += incCount;
-                                    // add op when content not equal
-                                    if (part[0] !== 0) {
-                                        return {
-                                            p: currentPos - incCount,
-                                            i: part[0] ===  1 ?  part[1] : undefined,
-                                            d: part[0] === -1 ?  part[1] : undefined,
-                                        };
-                                    }
-                                })
-                                .filter(x => x) as any;
-                })(),
-            };
-            if (!update.op || update.op.length===0) {
-                doc.localCache = mergeRes;
-                this.logDiagnostic('mutation.write.noop', {
-                    entityId: doc._id,
-                    mutationAttemptId,
-                    path: uri.path,
-                    version: doc.version,
-                });
-                return;
+            const result = await this.pushTextDocumentChanges(uri, merged.mergedText, 'filesystem_save');
+            if (result.kind!=='applied' && result.kind!=='noop' && result.kind!=='queued') {
+                throw vscode.FileSystemError.Unavailable('Document save is unconfirmed; local work is retained for recovery.');
             }
-            this.isDirty = (update.op && update.op.length) ? true : false;
-            await this.socket.applyOtUpdate(doc._id, update);
-            doc.localCache = mergeRes;
-            doc.remoteCache = mergeRes;
-            setTimeout(() => {
-                this.notify([
-                    {type: vscode.FileChangeType.Changed, uri: uri}
-                ]);
-            }, 10);
-            doc.lastVersion = doc.version;
-            this.logDiagnostic('mutation.write.success', {
-                entityId: doc._id,
-                mutationAttemptId,
-                opCount: update.op.length,
-                path: uri.path,
-                version: doc.version,
-            });
+            this.notify([{type: vscode.FileChangeType.Changed, uri}]);
         }
     }
 
@@ -6680,7 +7173,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             throw vscode.FileSystemError.FileExists(uri);
         }
         const [folderName, parentFolderId] = [fileName, parentFolder._id];
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
         const res = await this.api.addFolder(identity, this.projectId, folderName, parentFolderId);
 
         if (res.type==='success' && res.entity!==undefined) {
@@ -6698,9 +7191,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                 mutationAttemptId,
                 path: uri.path,
             }, res.message);
-            if (res.message!==undefined) {
-                vscode.window.showErrorMessage(res.message);
-            }
+            throw vscode.FileSystemError.Unavailable(res.message ?? 'Folder creation was not confirmed by Overleaf');
         }
     }
 
@@ -6726,7 +7217,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             );
         }
         if (fileType && fileEntity) {
-            const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+            const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
             const res = await this.api.deleteEntity(identity, this.projectId, fileType, fileEntity._id);
             if (res.type==='success') {
                 this.removeEntityById(parentFolder, fileType, fileEntity._id, recursive);
@@ -6748,9 +7239,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                     path: uri.path,
                     recursive,
                 }, res.message);
-                if (res.message!==undefined) {
-                    vscode.window.showErrorMessage(res.message);
-                }
+                throw vscode.FileSystemError.Unavailable(res.message ?? 'Deletion was not confirmed by Overleaf');
             }
         } else {
             this.logDiagnostic('mutation.remove.rejected', {
@@ -6792,7 +7281,8 @@ export class VirtualFileSystem extends vscode.Disposable {
             return;
         }
 
-        // delete existence firstly
+        // Overleaf has no atomic replace+rename endpoint. Deleting the target
+        // first irreversibly loses it if the following request fails.
         if (newPath.fileType && newPath.fileEntity) {
             if (!force) {
                 this.logDiagnostic('mutation.rename.rejected', {
@@ -6804,17 +7294,44 @@ export class VirtualFileSystem extends vscode.Disposable {
                 });
                 throw vscode.FileSystemError.FileExists(newUri);
             }
-            await this.remove(newUri, true);
+            throw vscode.FileSystemError.NoPermissions('Cannot atomically overwrite this target. Move the existing file aside before renaming.');
+        }
+        const relPath = this.toDocumentSyncRelPath(oldUri);
+        const journal = await this.getDocumentSyncState();
+        if (Object.values(journal.records).some(record => (record.relPath===relPath || record.relPath.startsWith(`${relPath}/`)) && (record.localDirty || record.conflict))
+            || vscode.workspace.textDocuments.some(document => document.isDirty
+                && (document.uri.toString()===oldUri.toString() || document.uri.toString().startsWith(`${oldUri.toString()}/`)))) {
+            throw vscode.FileSystemError.Unavailable('Synchronize pending document changes before renaming this path');
         }
         // rename or move
         let res = undefined;
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
         if (oldPath.parentFolder===newPath.parentFolder) {
             const [entityType, entityId, newName] = [oldPath.fileType, oldPath.fileEntity._id, newPath.fileName];
             res = await this.api.renameEntity(identity, this.projectId, entityType, entityId, newName);
         } else {
             const [entityType, entityId, newParentFolderId] = [oldPath.fileType, oldPath.fileEntity._id, newPath.parentFolder._id];
+            const oldName = oldPath.fileEntity.name;
+            const parentPath = newUri.path.slice(0, newUri.path.lastIndexOf('/'));
+            const intermediateUri = newUri.with({path: `${parentPath}/${oldName}`});
+            if (newPath.fileName!==oldName && (await this._resolveUri(intermediateUri)).fileEntity) {
+                throw vscode.FileSystemError.FileExists(intermediateUri);
+            }
             res = await this.api.moveEntity(identity, this.projectId, entityType, entityId, newParentFolderId);
+            if (res.type==='success' && newPath.fileName!==oldName) {
+                // A move does not also rename on Overleaf. Expose the actual
+                // intermediate location if the second mutation is unconfirmed.
+                try {
+                    const renamed = await this.api.renameEntity(identity, this.projectId, entityType, entityId, newPath.fileName);
+                    if (renamed.type!=='success') { throw new Error(renamed.message ?? 'Rename rejected'); }
+                } catch (error) {
+                    this.removeEntity(oldPath.parentFolder, oldPath.fileType, oldPath.fileEntity);
+                    this.insertEntity(newPath.parentFolder, oldPath.fileType, oldPath.fileEntity);
+                    this.notify([{type: vscode.FileChangeType.Deleted, uri: oldUri}, {type: vscode.FileChangeType.Created, uri: intermediateUri}]);
+                    await this.requestRealtimeRecovery('document_version_mismatch');
+                    throw vscode.FileSystemError.Unavailable('The file moved, but its new name is unconfirmed. Refresh the project before retrying.');
+                }
+            }
         }
         // update local cache
         if (res?.type==='success') {
@@ -6843,9 +7360,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                 newPath: newUri.path,
                 oldPath: oldUri.path,
             }, res?.message);
-            if (res?.message!==undefined) {
-                vscode.window.showErrorMessage(res.message);
-            }
+            throw vscode.FileSystemError.Unavailable(res?.message ?? 'Rename was not confirmed by Overleaf');
         }
     }
 
@@ -6856,7 +7371,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                 outputBuildId: this.outputBuildId,
                 outputs: this.getFallbackOutputsFolder()?.outputs,
             });
-            const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+            const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
             // clear cache if needed
             if (shouldClearAuxFilesFirst) {
                 await this.api.deleteAuxFiles(identity, this.projectId);
@@ -6884,8 +7399,9 @@ export class VirtualFileSystem extends vscode.Disposable {
             });
             try {
                 const res = await this.api.compile(identity, this.projectId, rootResourcePath, draft, stopOnFirstError);
-                if (res.type==='success' && res.compile?.status==='success') {
-                    const outputFiles = res.compile.outputFiles ?? [];
+                const compile = res.compile;
+                const outputFiles = compile?.outputFiles ?? [];
+                if (res.type==='success' && compile?.status==='success') {
                     const outputsUpdated = await this.updateOutputs(outputFiles);
                     const primaryPdfPath = this.getPrimaryPdfOutputPath() ?? '';
                     if (!outputsUpdated) {
@@ -6901,11 +7417,23 @@ export class VirtualFileSystem extends vscode.Disposable {
                         rootResourcePath,
                     });
                     return true;
+                } else if (res.type==='success') {
+                    const outputsUpdated = outputFiles.length > 0
+                        ? await this.updateOutputs(outputFiles)
+                        : false;
+                    const failureDiagnostics = buildCompileFailureDiagnostics(compile, rootResourcePath, res.type);
+                    this.logDiagnostic('compile.failed', {
+                        ...failureDiagnostics,
+                        outputsUpdated,
+                        type: res.type,
+                    }, getCompileFailureSummary(compile, res.message));
+                    return false;
                 } else {
                     this.logDiagnostic('compile.failed', {
+                        statusCode: res.statusCode ?? -1,
                         rootResourcePath,
                         type: res.type,
-                    }, res.message);
+                    }, res.message ?? res.responseBody);
                     return false;
                 }
             } catch (error) {
@@ -6920,7 +7448,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     async stopCompile() {
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
         this.logDiagnostic('compile.stop_requested');
         const res = await this.api.stopCompile(identity, this.projectId);
         if (res.type==='success') {
@@ -7034,7 +7562,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             filePath,
             line,
         });
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
         const res = await this.api.proxySyncCode(identity, this.projectId, filePath, line, column, this.outputBuildId ?? '');
         if (res.type==='success') {
             this.logDiagnostic('sync_code.request_succeeded', {
@@ -7077,7 +7605,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             page,
             v,
         });
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
         const res = await this.api.proxySyncPdf(identity, this.projectId, page, h, v, this.outputBuildId ?? '');
         if (res.type==='success') {
             this.logDiagnostic('sync_pdf.request_succeeded', {
@@ -7109,7 +7637,7 @@ export class VirtualFileSystem extends vscode.Disposable {
 
         const {fileType} = await this._resolveUri(uri);
         if (fileType==='doc' || fileType==='file') {
-            const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+            const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
             const res = this.root && await this.api.proxyRequestToSpellingApi(identity, this.root.spellCheckLanguage, this.userId, words);
             if (res?.type==='success') {
                 return res.misspellings;
@@ -7118,7 +7646,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     async spellLearn(word: string) {
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
         const res = await this.api.spellingControllerLearn(identity, this.userId, word);
         if (res.type==='success') {
             this.root?.settings.learnedWords.push(word);
@@ -7129,7 +7657,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     async spellUnlearn(word: string) {
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
         const res = await this.api.spellingControllerUnlearn(identity, word);
         if (res.type==='success') {
             const index = this.root?.settings.learnedWords.findIndex((w) => w===word);
@@ -7214,7 +7742,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             return true;
         }
         try {
-            const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+            const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
             const res = await this.api.updateProjectSettings(identity, this.projectId, setting);
             if (res.type==='success') {
                 const keys = Object.keys(setting);
@@ -7241,7 +7769,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     async metadata() {
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
         const res = await this.api.getMetadata(identity, this.projectId);
         if (res.type==='success') {
             return res.meta?.projectMeta;
@@ -7251,7 +7779,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     async getUpdates(before?: number) {
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
         const res = await this.api.proxyToHistoryApiAndGetUpdates(identity, this.projectId, before);
         if (res.type==='success') {
             return res.updates;
@@ -7261,7 +7789,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     async getFileDiff(pathname:string, from:number, to:number) {
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
         const res = await this.api.proxyToHistoryApiAndGetFileDiff(identity, this.projectId, pathname, from, to);
         if (res.type==='success') {
             return res.diff;
@@ -7271,7 +7799,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     async getFileTreeDiff(from:number, to:number) {
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
         const res = await this.api.proxyToHistoryApiAndGetFileTreeDiff(identity, this.projectId, from, to);
         if (res.type==='success') {
             return res.treeDiff;
@@ -7282,14 +7810,17 @@ export class VirtualFileSystem extends vscode.Disposable {
 
     async getCurrentVersion() {
         const base = this.currentVersion ?? 0;
+        if (!Number.isSafeInteger(base) || base<0) { throw new Error('Invalid project history version'); }
+        if (base>=Number.MAX_SAFE_INTEGER) { throw new Error('Project history has no valid upper revision bound'); }
         let lb = base;
-        let rb = base+2**4;
+        let rb = Math.min(Number.MAX_SAFE_INTEGER, base+2**4);
         // firstly try: a) no update `+1`, b) one update `+2`
         const res = await this.getFileTreeDiff(base+1, base+1);
         if (res===undefined) {
             this.currentVersion = base;
             return base;
         }
+        if (base+2>Number.MAX_SAFE_INTEGER) { throw new Error('Project history has no valid upper revision bound'); }
         const res2 = await this.getFileTreeDiff(base+2, base+2);
         if (res2===undefined) {
             this.currentVersion = base+1;
@@ -7299,14 +7830,15 @@ export class VirtualFileSystem extends vscode.Disposable {
         do {
             const res = await this.getFileTreeDiff(rb, rb);
             if (res!==undefined) {
-                rb = lb + (rb-lb)*2;
+                if (rb===Number.MAX_SAFE_INTEGER) { throw new Error('Project history has no valid upper revision bound'); }
+                rb = Math.min(Number.MAX_SAFE_INTEGER, lb + (rb-lb)*2);
             } else {
                 break;
             }
         } while (true);
         // binary search the current version
         while (lb<rb) {
-            const mid = Math.floor((lb+rb)/2);
+            const mid = lb + Math.floor((rb-lb)/2);
             const res = await this.getFileTreeDiff(mid, mid);
             if (res!==undefined) {
                 lb = mid+1;
@@ -7320,7 +7852,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     async createLabel(comment: string, version: number) {
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
         const res = await this.api.createLabel(identity, this.projectId, comment, version);
         if (res.type==='success') {
             return res.labels?.at(0);
@@ -7330,7 +7862,7 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     async deleteLabel(labelId: string) {
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
         const res = await this.api.deleteLabel(identity, this.projectId, labelId);
         if (res.type==='success') {
             return true;
@@ -7340,13 +7872,13 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     async downloadProjectArchive(version: number) {
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
         const res = await this.api.downloadZipOfVersion(identity, this.projectId, version);
         return res.content;
     }
 
     async downloadCurrentProjectArchive() {
-        const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+        const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
         const res = await this.api.downloadCurrentProjectZip(identity, this.projectId);
         return res.content;
     }
@@ -7751,7 +8283,7 @@ export class VirtualFileSystem extends vscode.Disposable {
         });
 
         try {
-            const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+            const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
             const messageResponse = await this.api.createCommentMessage(identity, this.projectId, threadId, content);
             if (messageResponse.type!=='success') {
                 this.logDiagnostic('comments.create_failed', {
@@ -7782,8 +8314,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                     traceId: commentCreateSpan.traceContext.traceId,
                     threadId,
                 });
-                await this.socket.applyOtUpdate(doc._id, update);
-                doc.lastVersion = doc.version;
+                await this.applyConfirmedCommentUpdate(doc, update);
                 this.logDiagnostic('comments.create_anchor_apply_completed', {
                     docId: doc._id,
                     docVersion: doc.version ?? -1,
@@ -7792,28 +8323,19 @@ export class VirtualFileSystem extends vscode.Disposable {
                     threadId,
                 });
             } catch (error) {
-                const rollbackResponse = await this.api.deleteCommentThread(identity, this.projectId, doc._id, threadId)
-                    .catch((rollbackError) => {
-                        this.logDiagnostic('comments.create_rollback_failed', {
-                            docId: doc._id,
-                            failureClass: 'internal',
-                            operationId: commentCreateSpan.traceContext.operationId,
-                            path: uri.path,
-                            traceId: commentCreateSpan.traceContext.traceId,
-                            threadId,
-                        }, rollbackError);
-                        return {type: 'error'} as const;
-                    });
-                this.logDiagnostic('comments.create_anchor_failed', {
-                    docId: doc._id,
-                    failureClass: 'internal',
-                    operationId: commentCreateSpan.traceContext.operationId,
-                    path: uri.path,
-                    rollbackType: rollbackResponse.type,
-                    traceId: commentCreateSpan.traceContext.traceId,
-                    threadId,
-                }, error);
-                throw error;
+                // A missing acknowledgement is ambiguous: deleting the server
+                // thread could destroy a successfully committed comment/reply.
+                // Replay only the anchor for the already-created message.
+                await this.appendDeferredSynchronizationOperation({
+                    createdAt: new Date().toISOString(), id: `offline-op-${uuidv4()}`,
+                    kind: 'comment.anchorExistingThread',
+                    payload: {content, docId: doc._id, filePath, localMessageId: localMessage.id,
+                        selectedText, startOffset, threadId, serverMessageId: messageResponse.commentMessage?.id},
+                }, 'comment_anchor_confirmation_recovery');
+                this.logDiagnostic('comments.create_anchor_unconfirmed', {docId: doc._id, threadId}, error);
+                await this.requestRealtimeRecovery('document_version_mismatch');
+                commentCreateSpan.end({mode: 'offline-queued', outcome: 'anchor_confirmation_pending'});
+                return threadId;
             }
 
             if (messageResponse.commentMessage) {
@@ -7953,7 +8475,7 @@ export class VirtualFileSystem extends vscode.Disposable {
         });
 
         try {
-            const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+            const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
             const response = await this.api.createCommentMessage(identity, this.projectId, canonicalThreadId, content);
             if (response.type!=='success') {
                 throw new Error(response.message ?? vscode.l10n.t('Unable to reply to the Overleaf comment thread.'));
@@ -8063,7 +8585,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             return;
         }
         try {
-            const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+            const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
             const response = await this.api.editCommentMessage(identity, this.projectId, canonicalThreadId, messageId, content);
             if (response.type!=='success') {
                 throw new Error(response.message ?? vscode.l10n.t('Unable to edit the Overleaf comment.'));
@@ -8117,8 +8639,30 @@ export class VirtualFileSystem extends vscode.Disposable {
         }
     }
 
-    async deleteComment(threadId: string, messageId: string, ownOnly: boolean): Promise<void> {
+    async deleteComment(threadId: string, messageId: string, ownOnly: boolean): Promise<'message' | 'thread'> {
         const canonicalThreadId = this.resolveCanonicalCommentThreadId(threadId);
+        // Overleaf treats deletion of the root message as deletion of the
+        // thread, including its document anchor. Message DELETE leaves that
+        // anchor (and any replies) on the server.
+        const knownThread = this.getCommentThreadById(canonicalThreadId);
+        if (!knownThread?.messages.some(message => message.id===messageId)) {
+            // Missing state cannot tell us whether this is a reply or a root.
+            // Do not choose a destructive endpoint from an incomplete snapshot.
+            throw new Error(vscode.l10n.t('The comment is unavailable. Refresh the thread before deleting it.'));
+        }
+        const rootMessage = knownThread.messages[0];
+        if (rootMessage?.id===messageId) {
+            if (!this.getCommentThreadPermissions(canonicalThreadId).canDeleteThread) {
+                throw new Error(vscode.l10n.t('This Overleaf comment thread cannot be deleted by the current user.'));
+            }
+            const docIds = this.getCommentDocIdsForThreadId(canonicalThreadId);
+            const document = docIds.length===1 ? this._resolveById(docIds[0]) : undefined;
+            if (document?.fileType!=='doc') {
+                throw new Error(vscode.l10n.t('The comment anchor is unavailable. Refresh the thread before deleting it.'));
+            }
+            await this.deleteCommentThread(this.pathToUri(document.path), canonicalThreadId);
+            return 'thread';
+        }
         const commentDeleteSpan = startDiagnosticSpan('VirtualFileSystem', 'comments.lifecycle.delete_message', {
             messageId,
             ownOnly,
@@ -8160,10 +8704,10 @@ export class VirtualFileSystem extends vscode.Disposable {
                 mode: 'offline-queued',
                 outcome: 'queued',
             });
-            return;
+            return 'message';
         }
         try {
-            const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+            const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
             const response = ownOnly
                 ? await this.api.deleteOwnCommentMessage(identity, this.projectId, canonicalThreadId, messageId)
                 : await this.api.deleteCommentMessage(identity, this.projectId, canonicalThreadId, messageId);
@@ -8174,6 +8718,7 @@ export class VirtualFileSystem extends vscode.Disposable {
                 mode: 'online',
                 outcome: 'deleted',
             });
+            return 'message';
         } catch (error) {
             if (shouldTreatCommentMutationFailureAsTransient(error)) {
                 await this.transitionToOfflineMode('comment_delete_connectivity_failure', error, {
@@ -8189,13 +8734,13 @@ export class VirtualFileSystem extends vscode.Disposable {
                         ownOnly,
                         threadId: canonicalThreadId,
                     },
-                }, 'comment_delete_queued_after_connectivity_failure');
+            }, 'comment_delete_queued_after_connectivity_failure');
                 commentDeleteSpan.end({
                     failureClass: 'transient',
                     mode: 'offline-queued',
                     outcome: 'queued_after_connectivity_failure',
                 });
-                return;
+                return 'message';
             }
             if (previousThreadSnapshot) {
                 this.upsertCommentThread(canonicalThreadId, previousThreadSnapshot, 'thread_message_delete_rolled_back');
@@ -8255,7 +8800,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             return;
         }
         try {
-            const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+            const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
             const response = resolved
                 ? await this.api.resolveCommentThread(identity, this.projectId, doc._id, canonicalThreadId)
                 : await this.api.reopenCommentThread(identity, this.projectId, doc._id, canonicalThreadId);
@@ -8344,7 +8889,7 @@ export class VirtualFileSystem extends vscode.Disposable {
             return;
         }
         try {
-            const identity = await GlobalStateManager.authenticate(this.context, this.serverName);
+            const identity = await GlobalStateManager.authenticate(this.context, this.serverName, this.userId);
             const response = await this.api.deleteCommentThread(identity, this.projectId, doc._id, canonicalThreadId);
             if (response.type!=='success') {
                 throw new Error(response.message ?? vscode.l10n.t('Unable to delete the Overleaf comment thread.'));
@@ -8430,6 +8975,13 @@ export class RemoteFileSystemProvider implements vscode.FileSystemProvider {
     readonly onDidChangeFile: vscode.Event<vscode.FileChangeEvent[]> = this._emitter.event;
 
     private readonly vfss = new Map<string, VirtualFileSystem>();
+    private readonly pendingVfss = new Map<string, Promise<VirtualFileSystem>>();
+
+    public async flushPendingWrites() {
+        const results = await Promise.allSettled([...this.vfss.values()].map(vfs => vfs.flushOfflineProjectStatePersist()));
+        const failures = results.filter((result): result is PromiseRejectedResult => result.status==='rejected');
+        if (failures.length) { throw failures[0].reason; }
+    }
 
     constructor(private context: vscode.ExtensionContext) {
         this.context = context;
@@ -8442,9 +8994,9 @@ export class RemoteFileSystemProvider implements vscode.FileSystemProvider {
                 return `${serverName}\u0000${userId}\u0000${projectId}`;
             }
         } catch {
-            // Fall back to a URI-derived key when parsing fails.
+            // Invalid URI probes must never create an authenticated session.
         }
-        return `${uri.scheme}\u0000${uri.authority}\u0000${uri.query}`;
+        throw vscode.FileSystemError.FileNotFound('An Overleaf filesystem URI must identify a server, account and project.');
     }
 
     private compactDisposedVfsEntries() {
@@ -8515,7 +9067,7 @@ export class RemoteFileSystemProvider implements vscode.FileSystemProvider {
             })),
             {
                 placeHolder: 'Select an Overleaf project for diagnostics',
-                title: 'Overleaf Workshop: Active Project Diagnostics',
+                title: 'Overleaf-VS Code: Active Project Diagnostics',
             },
         );
 
@@ -8594,19 +9146,30 @@ export class RemoteFileSystemProvider implements vscode.FileSystemProvider {
         if (vfs) {
             return Promise.resolve(vfs);
         }
-        const nextVfs = await VirtualFileSystem.create(this.context, uri, this.notify.bind(this));
-        this.vfss.set(scopeKey, nextVfs);
-        logDiagnostic('RemoteFileSystemProvider', 'filesystem.vfs_created', {
-            projectId: nextVfs.projectId,
-            projectName: nextVfs.projectName,
-            scopeKey,
-            serverName: nextVfs.serverName,
-            uri: uri.toString(),
-        }, undefined, {
-            category: 'filesystem',
-            level: 'info',
-        });
-        return nextVfs;
+        const pendingVfs = this.pendingVfss.get(scopeKey);
+        if (pendingVfs) {
+            return pendingVfs;
+        }
+        const creationPromise = VirtualFileSystem.create(this.context, uri, this.notify.bind(this))
+            .then((nextVfs) => {
+                this.vfss.set(scopeKey, nextVfs);
+                logDiagnostic('RemoteFileSystemProvider', 'filesystem.vfs_created', {
+                    projectId: nextVfs.projectId,
+                    projectName: nextVfs.projectName,
+                    scopeKey,
+                    serverName: nextVfs.serverName,
+                    uri: uri.toString(),
+                }, undefined, {
+                    category: 'filesystem',
+                    level: 'info',
+                });
+                return nextVfs;
+            })
+            .finally(() => {
+                this.pendingVfss.delete(scopeKey);
+            });
+        this.pendingVfss.set(scopeKey, creationPromise);
+        return creationPromise;
     }
 
     prefetch(uri: vscode.Uri): Promise<VirtualFileSystem> {
@@ -8646,9 +9209,8 @@ export class RemoteFileSystemProvider implements vscode.FileSystemProvider {
     }
 
     rename(oldUri: vscode.Uri, newUri: vscode.Uri, options: { overwrite: boolean; }) {
-        if (oldUri.authority !== newUri.authority) {
-            vscode.window.showErrorMessage( vscode.l10n.t('Cannot rename across servers') );
-            return;
+        if (this.resolveVfsScopeKey(oldUri)!==this.resolveVfsScopeKey(newUri)) {
+            throw vscode.FileSystemError.NoPermissions('Cannot rename across projects or accounts');
         } else {
             return this.getVFS(oldUri).then( vfs => vfs.rename(oldUri, newUri, options.overwrite) );
         }

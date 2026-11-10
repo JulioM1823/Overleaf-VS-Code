@@ -1,14 +1,14 @@
 {
-  "name": "overleaf-workshop",
-  "displayName": "%extension.displayName%",
+  "name": "orbitleaf",
+  "displayName": "Overleaf-VS Code",
   "description": "%extension.description%",
-  "version": "0.15.8",
-  "icon": "resources/icons/app_icon.png",
+  "version": "0.16.6",
+  "icon": "resources/icons/orbitleaf.png",
   "author": {
     "name": "iamhyc",
     "email": "ychong@petalmail.com"
   },
-  "publisher": "iamhyc",
+  "publisher": "AstroJulio",
   "contributors": [
     {
       "name": "iamhyc",
@@ -52,15 +52,21 @@
   "bugs": {
     "url": "https://github.com/JulioM1823/Overleaf-VS-Code/issues"
   },
+  "homepage": "https://github.com/JulioM1823/Overleaf-VS-Code#readme",
   "engines": {
     "vscode": "^1.80.0"
   },
   "categories": [
+    "Programming Languages",
     "Other"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "onFileSystem:overleaf-workshop",
     "workspaceContains:.overleaf/settings.json",
+    "onView:overleaf-workshop.projectManager",
+    "onCommand:overleaf-workshop.projectManager.addServer",
+    "onCommand:overleaf-workshop.projectManager.loginServer",
     "onCommand:overleaf-workshop.comments.addComment",
     "onCommand:overleaf-workshop.comments.addCommentFromSelection"
   ],
@@ -147,7 +153,6 @@
         "command": "overleaf-workshop.projectManager.loginServer",
         "title": "%commands.projectManager.loginServer.title%",
         "icon": "$(log-in)",
-        "enablement": "viewItem == server_no_login",
         "category": "%extension.displayName%"
       },
       {
@@ -902,8 +907,8 @@
       "activitybar": [
         {
           "id": "overleaf-workshop",
-          "title": "Overleaf",
-          "icon": "resources/icons/overleaf_bw.svg"
+          "title": "Overleaf-VS Code",
+          "icon": "resources/icons/orbitleaf-activity.svg"
         }
       ]
     },
@@ -911,7 +916,7 @@
       "overleaf-workshop": [
         {
           "id": "overleaf-workshop.projectManager",
-          "name": "Overleaf"
+          "name": "Projects"
         }
       ],
       "explorer": [
@@ -1054,6 +1059,11 @@
           "command": "overleaf-workshop.projectManager.loginServer",
           "when": "view == overleaf-workshop.projectManager && viewItem == server_no_login",
           "group": "inline"
+        },
+        {
+          "command": "overleaf-workshop.projectManager.loginServer",
+          "when": "view == overleaf-workshop.projectManager && viewItem == server_login",
+          "group": "navigation@1"
         },
         {
           "command": "overleaf-workshop.projectManager.openLoginGuide",
@@ -1219,10 +1229,10 @@
     ]
   },
   "scripts": {
-    "download-pdfjs": "download -o views/pdf-viewer/vendor -e https://github.com/mozilla/pdf.js/releases/download/v3.10.111/pdfjs-3.10.111-dist.zip && cd views/pdf-viewer/vendor && patch -p1 < pdfjs-3.10.111-dist.patch",
-    "download-latex-basics": "download -o data/vendor -s 1 -e https://github.com/jlelong/vscode-latex-basics/archive/refs/tags/v1.5.4.zip",
-    "postinstall": "patch-package && npm run download-pdfjs && npm run download-latex-basics",
-    "vscode:prepublish": "npm run compile",
+    "download-pdfjs": "node scripts/install-vendor.cjs pdfjs",
+    "download-latex-basics": "node scripts/install-vendor.cjs latex",
+    "postinstall": "patch-package && node scripts/install-vendor.cjs",
+    "vscode:prepublish": "npm run compile && npm run package:source && npm run validate:release",
     "update-l10n": "npx @vscode/l10n-dev export -o ./l10n ./src",
     "validate:release": "node scripts/validate-release.cjs",
     "compile": "tsc -p ./ && cd views/chat-view && npm run build",
@@ -1230,8 +1240,11 @@
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
     "test:node": "node --test test/*.test.cjs",
-    "test": "node ./out/test/runTest.js",
-    "prepare": "husky install"
+    "test:webview-soak": "node scripts/run-webview-soak.cjs",
+    "test:live-sync": "node scripts/run-live-sync.cjs",
+    "test": "npm run test:node",
+    "prepare": "husky install",
+    "package:source": "node scripts/package-source.cjs"
   },
   "dependencies": {
     "@unified-latex/unified-latex-prettier": "^1.8.3",
@@ -1244,33 +1257,49 @@
     "minimatch": "^9.0.9",
     "node-fetch": "^2.7.0",
     "prettier": "^3.1.1",
+    "strip-json-comments": "^3.1.1",
     "socket.io-client": "github:overleaf/socket.io-client#0.9.17-overleaf-5",
-    "uuid": "^9.0.1"
+    "jszip": "^3.10.1",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@commitlint/cli": "^18.4.3",
     "@commitlint/config-conventional": "^18.4.3",
     "@types/diff-match-patch": "^1.0.34",
     "@types/fuzzysearch": "^1.0.2",
-    "@types/mocha": "^10.0.1",
     "@types/node": "20.2.5",
     "@types/node-fetch": "^2.6.11",
     "@types/socket.io-client": "^1.4.36",
-    "@types/uuid": "^9.0.6",
     "@types/vscode": "^1.80.0",
     "@typescript-eslint/eslint-plugin": "^5.59.8",
     "@typescript-eslint/parser": "^5.59.8",
     "@vscode/l10n-dev": "^0.0.31",
     "@vscode/test-electron": "^2.5.2",
-    "download-cli": "^1.1.1",
     "eslint": "^8.41.0",
     "husky": "^8.0.3",
-    "mocha": "^10.8.2",
     "patch-package": "^8.0.1",
     "typescript": "^5.1.3"
   },
   "extensionKind": [
     "workspace",
     "ui"
+  ],
+  "overrides": {
+    "ws": "$ws"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Project synchronization, authenticated requests, and offline replay require a trusted workspace."
+    },
+    "virtualWorkspaces": true
+  },
+  "license": "AGPL-3.0-only",
+  "keywords": [
+    "Overleaf",
+    "LaTeX",
+    "PDF",
+    "collaboration",
+    "ShareLaTeX"
   ]
 }

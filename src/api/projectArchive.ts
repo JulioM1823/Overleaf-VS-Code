@@ -1,3 +1,7 @@
+import JSZip = require('jszip');
+import { Readable } from 'stream';
+import { splitSafeProjectPath } from '../utils/projectPath';
+
 function normalizeArchivePath(path: string): string {
     return path.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
 }
@@ -38,64 +42,70 @@ function detectCommonArchiveRoot(paths: string[]): string | undefined {
     return firstRoot;
 }
 
-function buildArchivePathCandidates(path: string, projectName?: string, archiveRoot?: string): string[] {
-    const normalizedPath = normalizeArchivePath(path);
-    if (!normalizedPath) {
-        return [];
-    }
+export interface ArchiveLimits { maxEntries: number, maxFileBytes: number, maxTotalBytes: number }
+const defaultLimits: ArchiveLimits = {maxEntries: 20_000, maxFileBytes: 64 * 1024 * 1024, maxTotalBytes: 256 * 1024 * 1024};
 
-    const candidates = new Set<string>([normalizedPath]);
-    const strippedProjectPath = stripArchiveRoot(normalizedPath, projectName);
-    if (strippedProjectPath) {
-        candidates.add(strippedProjectPath);
-    }
+async function readBoundedEntry(entry: JSZip.JSZipObject, limit: number): Promise<Uint8Array> {
+    return new Promise((resolve, reject) => {
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        const stream = entry.nodeStream('nodebuffer') as Readable;
+        stream.on('data', (chunk: Uint8Array) => {
+            size += chunk.length;
+            if (size > limit) {
+                stream.destroy();
+                chunks.length = 0;
+                reject(new Error('Project archive exceeds the extraction size limit'));
+                return;
+            }
+            chunks.push(chunk);
+        });
+        stream.on('error', reject);
+        stream.on('end', () => resolve(Buffer.concat(chunks, size)));
 
-    const strippedArchiveRoot = stripArchiveRoot(normalizedPath, archiveRoot);
-    if (strippedArchiveRoot) {
-        candidates.add(strippedArchiveRoot);
-    }
-
-    return Array.from(candidates);
+    });
 }
 
 export async function loadProjectArchiveEntries(
     content: Uint8Array,
     projectName?: string,
+    limits: ArchiveLimits = defaultLimits,
 ): Promise<Map<string, Uint8Array>> {
-    const jsZipModule = require('jszip');
-    const archive = await jsZipModule.loadAsync(Buffer.from(content));
-    const files = new Map<string, Uint8Array>();
-    const archivePaths = Object.values<any>(archive.files)
-        .filter((entry) => !entry.dir)
-        .map((entry) => normalizeArchivePath(entry.name))
-        .filter((path) => path && !path.startsWith('__MACOSX/'));
-    const commonArchiveRoot = detectCommonArchiveRoot(archivePaths);
-
-    for (const entry of Object.values<any>(archive.files)) {
-        if (entry.dir) {
-            continue;
+    const archive = await JSZip.loadAsync(content);
+    const entries = Object.values(archive.files);
+    if (entries.length > limits.maxEntries) { throw new Error('Project archive contains too many entries'); }
+    const paths: string[] = [];
+    for (const entry of entries) {
+        // JSZip sanitizes dot segments. Inspect the original spelling so a
+        // malicious name cannot become an innocent-looking overwrite.
+        const original = (entry as JSZip.JSZipObject & {unsafeOriginalName?: string}).unsafeOriginalName ?? entry.name;
+        if (/^[\\/]/.test(original) || !splitSafeProjectPath(original)
+            || original.replace(/\\/g, '/').split('/').some(part => ['.git', '.overleaf', '.vscode'].includes(part.toLowerCase()))) {
+            throw new Error('Unsafe project archive path');
         }
-
-        const normalizedPath = normalizeArchivePath(entry.name);
-        if (!normalizedPath || normalizedPath.startsWith('__MACOSX/')) {
-            continue;
-        }
-
-        const entryContent = await entry.async('uint8array') as Uint8Array;
-        for (const candidatePath of buildArchivePathCandidates(normalizedPath, projectName, commonArchiveRoot)) {
-            if (!files.has(candidatePath)) {
-                files.set(candidatePath, entryContent);
-            }
-        }
+        if (!entry.dir && !entry.name.startsWith('__MACOSX/')) { paths.push(normalizeArchivePath(entry.name)); }
     }
-
+    const root = detectCommonArchiveRoot(paths);
+    const files = new Map<string, Uint8Array>();
+    let totalBytes = 0;
+    for (const entry of entries) {
+        if (entry.dir || entry.name.startsWith('__MACOSX/')) { continue; }
+        const originalPath = normalizeArchivePath(entry.name);
+        const canonicalPath = stripArchiveRoot(originalPath, root)
+            || stripArchiveRoot(originalPath, projectName) || originalPath;
+        const segments = splitSafeProjectPath(canonicalPath);
+        if (!segments?.length || segments.some(segment => ['.git', '.overleaf', '.vscode'].includes(segment.toLowerCase()))) {
+            throw new Error('Project archive contains protected workspace metadata');
+        }
+        if (files.has(canonicalPath)) { throw new Error('Project archive contains colliding paths'); }
+        const bytes = await readBoundedEntry(entry, Math.min(limits.maxFileBytes, limits.maxTotalBytes - totalBytes));
+        totalBytes += bytes.length;
+        files.set(canonicalPath, bytes);
+    }
     return files;
 }
 
 export function decodeArchiveTextEntry(content?: Uint8Array): string | undefined {
-    if (!content) {
-        return undefined;
-    }
-
-    return new TextDecoder().decode(content);
+    if (!content) { return undefined; }
+    return new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(content);
 }

@@ -1,92 +1,49 @@
+// Validate public-release metadata and the exact corresponding-source payload.
 const fs = require('node:fs');
 const path = require('node:path');
+const assert = require('node:assert/strict');
+const {createHash} = require('node:crypto');
+const JSZip = require('jszip');
+const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+const root = path.resolve(__dirname, '..');
+const read = relative => fs.readFileSync(path.join(root, relative));
+const json = relative => JSON.parse(read(relative));
 
-function normalizeError(error) {
-    if (error instanceof Error) {
-        return {
-            errorMessage: error.message,
-            errorName: error.name,
-        };
+async function main() {
+    const pkg = json('package.json');
+    assert.equal(pkg.name, 'orbitleaf');
+    assert.equal(pkg.publisher, 'AstroJulio');
+    assert.equal(pkg.displayName, 'Overleaf-VS Code');
+    assert.equal(pkg.repository.url, 'https://github.com/JulioM1823/Overleaf-VS-Code');
+    assert.equal(pkg.bugs.url, 'https://github.com/JulioM1823/Overleaf-VS-Code/issues');
+    assert.equal(pkg.homepage, 'https://github.com/JulioM1823/Overleaf-VS-Code#readme');
+    assert.equal(pkg.license, 'AGPL-3.0-only');
+    assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
+    assert(pkg.contributes.commands.every(command => command.command.startsWith('overleaf-workshop.')));
+    assert(Object.keys(pkg.contributes.configuration.properties).every(key => key.startsWith('overleaf-workshop.')));
+    assert(pkg.activationEvents.includes('onFileSystem:overleaf-workshop'));
+    assert.equal(json('package.nls.json')['extension.displayName'], 'Overleaf-VS Code');
+    const paragraphs = read('README.md').toString().trim().split(/\r?\n\s*\r?\n/);
+    assert.equal(paragraphs[2], 'This extension is built on the source code of [Overleaf Workshop](https://github.com/overleaf-workshop/Overleaf-Workshop), developed by iamhyc and the Overleaf Workshop contributors.');
+    assert(paragraphs[3].includes('**AstroJulio**'));
+    const icon = read(pkg.icon);
+    assert.equal(icon.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+    assert(icon.readUInt32BE(16) >= 128 && icon.readUInt32BE(20) >= 128);
+    for (const file of ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'source/README.md', 'out/extension.js', 'views/chat-view/dist/index.html', 'views/pdf-viewer/vendor/LICENSE', 'views/pdf-viewer/vendor/build/pdf.js', 'views/pdf-viewer/vendor/build/pdf.worker.js', 'data/vendor/languages/latex-language-configuration.json']) read(file);
+    assert(read('LICENSE').toString().includes('GNU AFFERO GENERAL PUBLIC LICENSE'));
+    const source = json('source/manifest.json');
+    assert.equal(source.extensionId, `${pkg.publisher}.${pkg.name}`);
+    assert.equal(source.version, pkg.version);
+    const archive = read(`source/${source.archive}`);
+    assert.equal(hash(archive), source.sha256);
+    const zip = await JSZip.loadAsync(archive);
+    for (const entry of source.files) {
+        assert.equal(hash(read(entry.path)), entry.sha256, `Source is stale: ${entry.path}`);
+        const file = zip.file(entry.path);
+        assert(file, `Source missing ${entry.path}`);
+        assert.equal(hash(await file.async('nodebuffer')), entry.sha256, `Source archive mismatch: ${entry.path}`);
     }
-    if (typeof error === 'string') {
-        return { errorMessage: error };
-    }
-    if (error === undefined) {
-        return undefined;
-    }
-    return { errorMessage: String(error) };
+    for (const required of ['src/extension.ts', 'scripts/install-vendor.cjs', 'scripts/package-source.cjs', 'package-lock.json', 'views/chat-view/package-lock.json', 'scripts/vendor-patches/pdfjs-3.10.111-dist.patch']) assert(zip.file(required), `Source missing ${required}`);
+    console.log(JSON.stringify({status:'passed', extensionId:source.extensionId, version:pkg.version, sourceFiles:source.files.length, sourceSha256:source.sha256}));
 }
-
-function log(event, fields = {}, error) {
-    const record = {
-        event,
-        ...Object.fromEntries(Object.entries(fields).sort(([left], [right]) => left.localeCompare(right))),
-    };
-    const normalizedError = normalizeError(error);
-    if (normalizedError) {
-        Object.assign(record, normalizedError);
-    }
-    console.error(`ReleaseValidation: ${JSON.stringify(record)}`);
-}
-
-function assertFileExists(relativePath) {
-    const absolutePath = path.join(process.cwd(), relativePath);
-    if (!fs.existsSync(absolutePath)) {
-        throw new Error(`Missing required file: ${relativePath}`);
-    }
-    log('file.exists', { relativePath });
-}
-
-function readJson(relativePath) {
-    const absolutePath = path.join(process.cwd(), relativePath);
-    return JSON.parse(fs.readFileSync(absolutePath, 'utf8'));
-}
-
-function main() {
-    log('validation.started', { cwd: process.cwd() });
-
-    const packageJson = readJson('package.json');
-    const expectedRepositoryUrl = 'https://github.com/JulioM1823/Overleaf-VS-Code';
-    const expectedIssuesUrl = 'https://github.com/JulioM1823/Overleaf-VS-Code/issues';
-
-    if (packageJson.publisher !== 'iamhyc') {
-        throw new Error('Unexpected publisher change detected. Marketplace continuity requires a dedicated migration plan.');
-    }
-    log('package.publisher_verified', { publisher: packageJson.publisher });
-
-    if (packageJson.repository?.url !== expectedRepositoryUrl) {
-        throw new Error(`Unexpected repository url: ${packageJson.repository?.url ?? '<missing>'}`);
-    }
-    if (packageJson.bugs?.url !== expectedIssuesUrl) {
-        throw new Error(`Unexpected bugs url: ${packageJson.bugs?.url ?? '<missing>'}`);
-    }
-    log('package.metadata_verified', {
-        bugsUrl: packageJson.bugs.url,
-        repositoryUrl: packageJson.repository.url,
-        version: packageJson.version,
-    });
-
-    assertFileExists('.github/workflows/vsce-package.yml');
-    assertFileExists('.github/workflows/vsce-publish.yml');
-    assertFileExists('docs/governance.md');
-    assertFileExists('docs/roadmap/milestones.md');
-    assertFileExists('docs/roadmap/blocked-items.md');
-    assertFileExists('docs/testing-harnesses.md');
-
-    const secretsPresent = {
-        hasOvsxToken: Boolean(process.env.OVSX_TOKEN),
-        hasVscePat: Boolean(process.env.VSCE_PAT),
-    };
-    log('release.secrets_observed', secretsPresent);
-
-    log('validation.completed', {
-        status: 'success',
-    });
-}
-
-try {
-    main();
-} catch (error) {
-    log('validation.failed', {}, error);
-    process.exitCode = 1;
-}
+main().catch(error => { console.error(error.message); process.exitCode = 1; });

@@ -26,6 +26,14 @@
 
     // @ts-ignore
     const vscode = acquireVsCodeApi();
+    // Configure the viewer before DOMContentLoaded constructs its scripting
+    // manager. Passing enableScripting to getDocument does not control it.
+    PDFViewerApplicationOptions.set('enableScripting', false);
+    PDFViewerApplicationOptions.set('isEvalSupported', false);
+    PDFViewerApplicationOptions.set('disablePreferences', true);
+    // The extension supplies bytes. The generic viewer's demo URL otherwise
+    // starts an unrelated load that races our preview and rejects unhandled.
+    PDFViewerApplicationOptions.set('defaultUrl', '');
     let globalPdfViewerState = {
         colorTheme: 'default',
         containerScrollLeft: 0,
@@ -39,6 +47,34 @@
     let firstLoaded = true;
     let syncHighlightTimer;
     const pdfSyncHighlight = globalThis.OverleafPdfSyncHighlight;
+    let pdfViewerConfig = {
+        cMapUrl: '',
+    };
+    const pdfDocumentLoader = new globalThis.OverleafPdfDocumentLoader(
+        options => pdfjsLib.getDocument(options),
+        doc => {
+            if (firstLoaded) { firstLoaded = false; }
+            else { backupPdfViewerState(); }
+            PDFViewerApplication.isViewerEmbedded = true;
+            PDFViewerApplication.load(doc);
+        },
+        () => showPdfError('Unable to render the PDF. Check the compilation diagnostics and compile again.'),
+    );
+    function showPdfError(message) {
+        let banner = document.getElementById('overleaf-pdf-error');
+        if (!banner) {
+            banner = document.createElement('div');
+            banner.id = 'overleaf-pdf-error';
+            banner.setAttribute('role', 'alert');
+            document.body.appendChild(banner);
+        }
+        banner.textContent = message;
+        banner.hidden = false;
+    }
+    window.addEventListener('pagehide', () => {
+        clearSyncHighlight();
+        void pdfDocumentLoader.dispose();
+    }, {once:true});
 
     function updatePdfViewerState() {
         const pdfViewerState = vscode.getState() || globalPdfViewerState;
@@ -62,7 +98,6 @@
 
     function backupPdfViewerState() {
         if (PDFViewerApplication.pdfViewer.currentScaleValue !== null) {
-            console.log( PDFViewerApplication.pdfViewer.currentScaleValue );
             globalPdfViewerState.currentScaleValue = PDFViewerApplication.pdfViewer.currentScaleValue;
         }
         globalPdfViewerState.pdfViewerScrollMode = PDFViewerApplication.pdfViewer.scrollMode;
@@ -77,29 +112,55 @@
         });
     }
 
+    function isPlainObject(value) {
+        return value !== null && typeof value === 'object' && Array.isArray(value) === false;
+    }
+
+    function isValidThemeName(theme) {
+        return typeof theme === 'string' && theme.match(/^[a-zA-Z0-9-_]+$/) !== null;
+    }
+
+    function isValidColor(value) {
+        return typeof value === 'string' && value.match(/^#[0-9a-fA-F]{6}$/) !== null;
+    }
+
+    function normalizeColorThemes(themes) {
+        if (!isPlainObject(themes)) {
+            return ColorThemes;
+        }
+        const normalized = {};
+        for (const [theme, value] of Object.entries(themes)) {
+            if (
+                isValidThemeName(theme)
+                && isPlainObject(value)
+                && isValidColor(value.fontColor)
+                && isValidColor(value.bgColor)
+            ) {
+                normalized[theme] = {
+                    fontColor: value.fontColor,
+                    bgColor: value.bgColor,
+                };
+            }
+        }
+        return Object.keys(normalized).length > 0 ? normalized : ColorThemes;
+    }
+
     function updateColorThemes(themes) {
-        ColorThemes = themes;
+        ColorThemes = normalizeColorThemes(themes);
         // set global css
         const style = document.createElement('style');
+        style.id = 'overleaf-workshop-theme-styles';
+        const rules = [];
         for (const theme in ColorThemes) {
-            // sanitize theme name
-            if (theme.match(/^[a-zA-Z0-9-_]+$/) === null) {
-                continue;
-            }
-            // sanitize color value
-            if (ColorThemes[theme].fontColor.match(/^#[0-9a-fA-F]{6}$/) === null) {
-                continue;
-            }
-            if (ColorThemes[theme].bgColor.match(/^#[0-9a-fA-F]{6}$/) === null) {
-                continue;
-            }
             // update css
-            style.innerHTML += `
-                #theme-${theme}::before {
-                    background-color: ${ColorThemes[theme].bgColor};
-                }
-            `;
+            rules.push(
+                `#theme-${theme}::before {`,
+                `  background-color: ${ColorThemes[theme].bgColor};`,
+                '}',
+            );
         }
+        style.textContent = rules.join('\n');
+        document.getElementById(style.id)?.remove();
         document.head.appendChild(style);
     }
 
@@ -154,7 +215,9 @@
         const setAttribute = (index) => {
             const theme = Object.keys(ColorThemes)[index];
             globalPdfViewerState.colorTheme = theme;
-            button.innerHTML = `<span>${theme}</span>`;
+            const label = document.createElement('span');
+            label.textContent = theme;
+            button.replaceChildren(label);
             button.setAttribute('title', `Theme: ${theme}`);
             button.setAttribute('id', `theme-${theme}`);
         };
@@ -174,19 +237,19 @@
     }
 
     async function updatePdf(pdf) {
-        clearSyncHighlight();
-        const doc = await pdfjsLib.getDocument({
-            data: pdf,
-            cMapUrl: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.10.111/cmaps/',
-            cMapPacked: true
-        }).promise;
-        if (firstLoaded) {
-            firstLoaded = false;
-        } else {
-            backupPdfViewerState();
+        if (!(pdf instanceof ArrayBuffer) && !(pdf instanceof Uint8Array)) {
+            return;
         }
-        PDFViewerApplication.isViewerEmbedded = true;
-        PDFViewerApplication.load(doc);
+        clearSyncHighlight();
+        const options = {
+            data: pdf,
+            cMapPacked: true,
+            isEvalSupported: false
+        };
+        if (typeof pdfViewerConfig.cMapUrl === 'string' && pdfViewerConfig.cMapUrl.length > 0) {
+            options.cMapUrl = pdfViewerConfig.cMapUrl;
+        }
+        await pdfDocumentLoader.update(options);
     }
 
     // Reference: https://github.com/James-Yu/LaTeX-Workshop/blob/master/viewer/latexworkshop.ts#L306
@@ -232,6 +295,9 @@
     //Reference: https://github.com/overleaf/overleaf/blob/main/services/web/frontend/js/features/pdf-preview/util/pdf-js-wrapper.js#L163
     function syncPdf(pageElem, pageNum, clientX, clientY, innerText) {
         const pageCanvas = pageElem.querySelector('canvas');
+        if (pageCanvas === null) {
+            return;
+        }
         const pageRect = pageCanvas.getBoundingClientRect();
         const {viewport} = PDFViewerApplication.pdfViewer.getPageView(pageNum - 1);
         const dx = clientX - pageRect.left;
@@ -240,7 +306,7 @@
         top = viewport.viewBox[3] - top;
         vscode.postMessage({
             type: 'syncPdf',
-            content: { page: Number(pageNum), h: left, v: top, identifier: innerText},
+            content: { page: Number(pageNum), h: left, v: top, identifier: String(innerText ?? '').slice(0, 256)},
         });
         backupPdfViewerState();
     }
@@ -249,8 +315,7 @@
         // init pdf.js configuration
         PDFViewerApplication.initializedPromise
         .then(() => {
-            const {eventBus, _boundEvents} = PDFViewerApplication;
-            eventBus._off("beforeprint", _boundEvents.beforePrint);
+            const {eventBus} = PDFViewerApplication;
             eventBus.on('documentloaded', updatePdfViewerState);
             // backup scale
             eventBus._on('scalechanged', backupPdfViewerState);
@@ -267,19 +332,38 @@
         // add message listener
         window.addEventListener('message', async (e) => {
             const message = e.data;
+            if (!isPlainObject(message) || typeof message.type !== 'string') {
+                return;
+            }
             switch (message.type) {
                 case 'update':
-                    updatePdf(message.content);
+                    document.getElementById('overleaf-pdf-error')?.setAttribute('hidden', '');
+                    await updatePdf(message.content);
+                    break;
+                case 'loadError':
+                    if (typeof message.content==='string' && message.content.length<=512) {
+                        showPdfError(message.content);
+                    }
                     break;
                 case 'syncCode':
-                    syncCode(message.content);
+                    if (isPlainObject(message.content)) {
+                        syncCode(message.content);
+                    }
+                    break;
+                case 'configure':
+                    if (typeof message.cMapUrl === 'string' && message.cMapUrl.length <= 2_048) {
+                        pdfViewerConfig = {
+                            ...pdfViewerConfig,
+                            cMapUrl: message.cMapUrl,
+                        };
+                    }
                     break;
                 case 'initState':
                     updatePdfViewerDefaults(message.defaults);
-                    if (message.content!==undefined) {
+                    if (isPlainObject(message.content)) {
                         Object.assign(globalPdfViewerState, message.content);
                     }
-                    if (message.colorThemes!==undefined) {
+                    if (isPlainObject(message.colorThemes)) {
                         updateColorThemes(message.colorThemes);
                     }
                     updatePdfViewerState();
@@ -292,7 +376,13 @@
 
         // add mouse double click listener
         window.addEventListener('dblclick', (e) => {
-            const pageElem = e.target.parentElement.parentElement;
+            if (!(e.target instanceof HTMLElement)) {
+                return;
+            }
+            const pageElem = e.target.closest('.page');
+            if (pageElem === null) {
+                return;
+            }
             const pageNum = pageElem.getAttribute('data-page-number');
             if (pageNum === null || pageNum === undefined) {
                 return;

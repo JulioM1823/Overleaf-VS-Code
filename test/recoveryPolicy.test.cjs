@@ -14,8 +14,8 @@ test('calculateRecoveryDelayMs uses immediate retry first then bounded backoff',
     assert.equal(calculateRecoveryDelayMs(2), 1000);
     assert.equal(calculateRecoveryDelayMs(3), 2000);
     assert.equal(calculateRecoveryDelayMs(4), 4000);
-    assert.equal(calculateRecoveryDelayMs(5), 5000);
-    assert.equal(calculateRecoveryDelayMs(10), 5000);
+    assert.equal(calculateRecoveryDelayMs(5), 8000);
+    assert.equal(calculateRecoveryDelayMs(10), 30000);
 });
 
 test('extractOutputBuildId returns first matched build id', () => {

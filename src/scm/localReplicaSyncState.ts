@@ -1,9 +1,10 @@
-import * as DiffMatchPatch from 'diff-match-patch';
+import { createHash } from 'crypto';
+import { mergeTextFromCommonBase } from '../core/threeWayMerge';
 
 export type LocalReplicaSnapshotKind = 'directory' | 'file' | 'missing';
 
 export interface LocalReplicaSnapshot {
-    hash: number,
+    hash: number | string,
     kind: LocalReplicaSnapshotKind,
     size: number,
 }
@@ -43,20 +44,6 @@ export type LocalReplicaMergeResult =
     | { kind: 'conflict', failedPatchCount?: number, reason: 'missing_baseline' | 'non_text_content' | 'patch_apply_failed' }
     | { kind: 'merged', mergedContent: Uint8Array };
 
-function hashTextContent(content?: Uint8Array): number {
-    if (content===undefined) {
-        return -1;
-    }
-    const str = new TextDecoder().decode(content);
-    let hash = 0;
-    for (let i = 0; i < str.length; i += 1) {
-        const chr = str.charCodeAt(i);
-        hash = (hash << 5) - hash + chr;
-        hash |= 0;
-    }
-    return hash;
-}
-
 function hashSnapshotKind(kind: LocalReplicaSnapshotKind): number {
     switch (kind) {
         case 'missing':
@@ -73,7 +60,7 @@ export function createLocalReplicaSnapshot(
     content?: Uint8Array,
 ): LocalReplicaSnapshot {
     return {
-        hash: kind==='file' ? hashTextContent(content) : hashSnapshotKind(kind),
+        hash: kind==='file' ? createHash('sha256').update(content ?? new Uint8Array()).digest('hex') : hashSnapshotKind(kind),
         kind,
         size: content?.length ?? 0,
     };
@@ -83,6 +70,11 @@ export function localReplicaSnapshotsEqual(
     left?: LocalReplicaSnapshot,
     right?: LocalReplicaSnapshot,
 ): boolean {
+    // Legacy numeric hashes cannot establish equality. A matching pair of fresh
+    // snapshots will migrate the baseline; divergent legacy files stay conflicted.
+    if (left?.kind==='file' && (typeof left.hash!=='string' || typeof right?.hash!=='string')) {
+        return false;
+    }
     return left?.kind===right?.kind
         && left?.hash===right?.hash
         && left?.size===right?.size;
@@ -136,7 +128,9 @@ export function classifyLocalReplicaRuntimeSync(
 
     const baseline = state?.baseline;
     if (!baseline) {
-        return {kind: 'apply', reason: 'bootstrap'};
+        return source.kind!=='missing' && target.kind==='missing'
+            ? {kind: 'apply', reason: 'bootstrap'}
+            : {kind: 'conflict', reason: 'missing_baseline'};
     }
 
     const sourceChanged = !localReplicaSnapshotsEqual(source, baseline);
@@ -208,29 +202,19 @@ export function mergeLocalReplicaText(
         return {kind: 'conflict', reason: 'non_text_content'};
     }
 
-    const decoder = new TextDecoder();
-    const encoder = new TextEncoder();
-    const dmp = new DiffMatchPatch();
-    const baseText = decoder.decode(baseContent);
-    const localText = decoder.decode(localContent);
-    const remoteText = decoder.decode(remoteContent);
-    const remotePatches = dmp.patch_make(baseText, remoteText);
-    const mergedResult = dmp.patch_apply(remotePatches, localText);
-    const mergedText = mergedResult[0] as string;
-    const patchResults = mergedResult[1] as boolean[];
-
-    if (!patchResults.every(Boolean)) {
-        return {
-            kind: 'conflict',
-            failedPatchCount: patchResults.filter(result => !result).length,
-            reason: 'patch_apply_failed',
-        };
+    // Invalid UTF-8 must remain binary. Lossy decoding followed by encoding can
+    // irreversibly replace bytes, even when every patch appears to apply.
+    let merged;
+    try {
+        const decoder = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true});
+        merged = mergeTextFromCommonBase(decoder.decode(baseContent), decoder.decode(localContent), decoder.decode(remoteContent));
+    } catch {
+        return {kind: 'conflict', reason: 'non_text_content'};
     }
-
-    return {
-        kind: 'merged',
-        mergedContent: encoder.encode(mergedText),
-    };
+    if (merged.kind==='conflict') {
+        return {kind: 'conflict', failedPatchCount: merged.failedPatchCount, reason: 'patch_apply_failed'};
+    }
+    return {kind: 'merged', mergedContent: new TextEncoder().encode(merged.mergedText)};
 }
 
 export function parsePersistedLocalReplicaSyncState(raw: string): PersistedLocalReplicaSyncState {

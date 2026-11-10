@@ -3,14 +3,14 @@ const assert = require('node:assert/strict');
 
 const { reconstructDocumentFromDiff } = require('../out/api/docDiff.js');
 
-test('reconstructDocumentFromDiff joins unchanged, inserted, and deleted chunks in order', () => {
+test('reconstructDocumentFromDiff reconstructs the target revision without resurrecting deleted text', () => {
     assert.equal(
         reconstructDocumentFromDiff([
             { u: 'Hello ' },
             { i: 'world' },
             { d: '!' },
         ]),
-        'Hello world!',
+        'Hello world',
     );
 });
 

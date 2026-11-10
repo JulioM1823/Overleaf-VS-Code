@@ -1,0 +1,9 @@
+{
+  "name": "orbitleaf-release-smoke-driver",
+  "displayName": "Release smoke test driver",
+  "publisher": "release-test",
+  "version": "0.0.1",
+  "private": true,
+  "engines": { "vscode": "^1.80.0" },
+  "main": "./index.cjs"
+}

@@ -10,6 +10,13 @@ const COOKIE_ATTRIBUTE_NAMES = new Set([
     'partitioned',
 ]);
 
+const COOKIE_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const MAX_COOKIE_HEADER_LENGTH = 32_768;
+
+function hasUnsafeCookieHeaderCharacters(value: string): boolean {
+    return /[\u0000-\u001F\u007F]/.test(value);
+}
+
 function parseCookiePair(rawCookie: string): [string, string] | undefined {
     const separatorIndex = rawCookie.indexOf('=');
     if (separatorIndex <= 0) {
@@ -18,7 +25,13 @@ function parseCookiePair(rawCookie: string): [string, string] | undefined {
 
     const name = rawCookie.slice(0, separatorIndex).trim();
     const value = rawCookie.slice(separatorIndex + 1).trim();
-    if (!name || COOKIE_ATTRIBUTE_NAMES.has(name.toLowerCase())) {
+    if (
+        !name
+        || !COOKIE_NAME_PATTERN.test(name)
+        || COOKIE_ATTRIBUTE_NAMES.has(name.toLowerCase())
+        || hasUnsafeCookieHeaderCharacters(name)
+        || hasUnsafeCookieHeaderCharacters(value)
+    ) {
         return undefined;
     }
 
@@ -28,7 +41,11 @@ function parseCookiePair(rawCookie: string): [string, string] | undefined {
 function parseCookieHeader(cookieHeader: string): Map<string, string> {
     const cookieMap = new Map<string, string>();
     const normalizedHeader = cookieHeader.replace(/^cookie:\s*/i, '').trim();
-    if (!normalizedHeader) {
+    if (
+        !normalizedHeader
+        || normalizedHeader.length > MAX_COOKIE_HEADER_LENGTH
+        || hasUnsafeCookieHeaderCharacters(normalizedHeader)
+    ) {
         return cookieMap;
     }
 

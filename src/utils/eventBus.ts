@@ -9,6 +9,7 @@ import { logCommentDiagnostics } from '../comments/commentDiagnostics';
 import { DiagnosticCategory, logDiagnostic } from './diagnostics';
 
 export type Events = {
+    'serverSessionEndedEvent': {serverName: string},
     'fileWillOpenEvent': {uri: vscode.Uri},
     'pdfWillOpenEvent': {uri: vscode.Uri, doc:PdfDocument, webviewPanel:vscode.WebviewPanel},
     'spellCheckLanguageUpdateEvent': {language:string},
@@ -58,7 +59,7 @@ export type Events = {
     },
     'reviewLocalMutationEvent': {
         content?: string,
-        kind: 'deleteMessage' | 'editMessage',
+        kind: 'deleteMessage' | 'deleteThread' | 'editMessage',
         messageId: string,
         origin: string,
         threadId: string,

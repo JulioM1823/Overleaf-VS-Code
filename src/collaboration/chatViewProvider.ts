@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { ProjectMessageResponseSchema } from '../api/base';
 import {
@@ -11,10 +12,62 @@ import type { OverleafChatSendResult } from './chatSendResult';
 
 let nextChatViewProviderInstanceId = 1;
 
+type ChatWebviewMessage =
+    | {type: 'chat-ready'}
+    | {type: 'get-messages'}
+    | {type: 'send-message', content: string}
+    | {type: 'edit-message', content: string, messageId: string}
+    | {type: 'delete-message', messageId: string};
+
+const MAX_CHAT_WEBVIEW_CONTENT_LENGTH = 100_000;
+const MAX_CHAT_WEBVIEW_ID_LENGTH = 1_024;
+
+function createWebviewNonce(): string {
+    return crypto.randomBytes(16).toString('base64');
+}
+
+function normalizeWebviewString(value: unknown, maxLength: number): string | undefined {
+    if (typeof value !== 'string' || value.length > maxLength) {
+        return undefined;
+    }
+    return value;
+}
+
+function normalizeChatWebviewMessage(message: unknown): ChatWebviewMessage | undefined {
+    if (message === null || typeof message !== 'object') {
+        return undefined;
+    }
+
+    const candidate = message as Record<string, unknown>;
+    switch (candidate.type) {
+        case 'chat-ready':
+        case 'get-messages':
+            return {type: candidate.type};
+        case 'send-message': {
+            const content = normalizeWebviewString(candidate.content, MAX_CHAT_WEBVIEW_CONTENT_LENGTH);
+            return content === undefined ? undefined : {type: 'send-message', content};
+        }
+        case 'edit-message': {
+            const content = normalizeWebviewString(candidate.content, MAX_CHAT_WEBVIEW_CONTENT_LENGTH);
+            const messageId = normalizeWebviewString(candidate.messageId, MAX_CHAT_WEBVIEW_ID_LENGTH);
+            return content === undefined || messageId === undefined
+                ? undefined
+                : {type: 'edit-message', content, messageId};
+        }
+        case 'delete-message': {
+            const messageId = normalizeWebviewString(candidate.messageId, MAX_CHAT_WEBVIEW_ID_LENGTH);
+            return messageId === undefined ? undefined : {type: 'delete-message', messageId};
+        }
+        default:
+            return undefined;
+    }
+}
+
 export class ChatViewProvider implements vscode.WebviewViewProvider {
     private hasUnreadMessages = 0;
     private readonly diagnosticsStateRegistration: {dispose: () => void};
     private readonly providerInstanceIdValue = nextChatViewProviderInstanceId++;
+    private triggerDisposables?: vscode.Disposable[];
     private webviewDisposables: vscode.Disposable[] = [];
     private webviewView?: vscode.WebviewView;
 
@@ -113,7 +166,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.webviewDisposables = [];
     }
 
+    private clearTriggerDisposables() {
+        const disposables = this.triggerDisposables;
+        if (disposables===undefined) {
+            return;
+        }
+        this.triggerDisposables = undefined;
+        disposables.splice(0).forEach((disposable) => disposable.dispose());
+    }
+
     dispose() {
+        this.clearTriggerDisposables();
         this.clearWebviewDisposables();
         this.diagnosticsStateRegistration.dispose();
         this.webviewView = undefined;
@@ -122,7 +185,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     async loadWebviewHtml(webview: vscode.Webview): Promise<string> {
         const rootFolder = 'views/chat-view/dist';
         const htmlPath = vscode.Uri.joinPath(this.extensionUri, rootFolder, 'index.html');
-        return (await vscode.workspace.fs.readFile(htmlPath)).toString();
+        const nonce = createWebviewNonce();
+        const csp = [
+            "default-src 'none'",
+            `font-src ${webview.cspSource} data:`,
+            `img-src ${webview.cspSource} data:`,
+            `script-src 'nonce-${nonce}'`,
+            `style-src ${webview.cspSource} 'unsafe-inline'`,
+            "connect-src 'none'",
+        ].join('; ');
+        return (await vscode.workspace.fs.readFile(htmlPath)).toString()
+            .replace(/<link rel="icon"[^>]*>\s*/i, '')
+            .replace(/<head>/i, `<head>\n    <meta http-equiv="Content-Security-Policy" content="${csp}">`)
+            .replace(/<script\b(?![^>]*\bnonce=)/i, `<script nonce="${nonce}"`);
     }
 
     resolveWebviewView(
@@ -133,12 +208,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.clearWebviewDisposables();
         this.webviewView = webviewView;
         return this.loadWebviewHtml(webviewView.webview).then((html) => {
-            webviewView.webview.options = {enableScripts:true};
+            webviewView.webview.options = {
+                enableScripts: true,
+                localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'views/chat-view/dist')],
+            };
             webviewView.webview.html = html;
             this.logDiagnostic('webview.resolved');
             this.webviewDisposables.push(
                 webviewView.webview.onDidReceiveMessage((event) => {
-                    switch (event.type) {
+                    const message = normalizeChatWebviewMessage(event);
+                    if (message === undefined) {
+                        this.logDiagnostic('webview.message_ignored', {
+                            messageType: typeof event === 'object' && event !== null
+                                ? String((event as Record<string, unknown>).type ?? '')
+                                : typeof event,
+                        });
+                        return;
+                    }
+                    switch (message.type) {
                         case 'chat-ready':
                             this.logDiagnostic('webview.ready');
                             this.postCurrentMessages();
@@ -147,13 +234,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                             this.postCurrentMessages();
                             break;
                         case 'send-message':
-                            void this.sendMessage(event.content);
+                            void this.sendMessage(message.content);
                             break;
                         case 'edit-message':
-                            void this.editMessage(event.messageId, event.content);
+                            void this.editMessage(message.messageId, message.content);
                             break;
                         case 'delete-message':
-                            void this.deleteMessage(event.messageId);
+                            void this.deleteMessage(message.messageId);
                             break;
                         default:
                             break;
@@ -296,8 +383,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     get triggers() {
-        return [
-            EventBus.on('chatMessagesChangedEvent', ({origin, message}) => {
+        if (this.triggerDisposables!==undefined) {
+            return this.triggerDisposables;
+        }
+
+        const disposables: vscode.Disposable[] = [];
+        try {
+            disposables.push(vscode.window.registerWebviewViewProvider(`${ROOT_NAME}.chatWebview`, this, {
+                webviewOptions: {retainContextWhenHidden:true},
+            }));
+            disposables.push(EventBus.on('chatMessagesChangedEvent', ({origin, message}) => {
                 if (origin!==this.vfs.origin.toString()) {
                     return;
                 }
@@ -306,10 +401,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     this.emitUnreadCountChanged('chat_message_unread_incremented');
                 }
                 this.postCurrentMessages();
-            }),
-            vscode.window.registerWebviewViewProvider(`${ROOT_NAME}.chatWebview`, this, {
-                webviewOptions: {retainContextWhenHidden:true},
-            }),
-        ];
+            }));
+            this.triggerDisposables = disposables;
+            return disposables;
+        } catch (error) {
+            disposables.splice(0).forEach((disposable) => disposable.dispose());
+            throw error;
+        }
     }
 }

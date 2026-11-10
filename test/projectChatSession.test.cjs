@@ -11,6 +11,11 @@ Module._load = function patchedLoad(request, parent, isMain) {
                     return message;
                 },
             },
+            workspace: {
+                getConfiguration: () => ({
+                    get: (_key, fallback) => fallback,
+                }),
+            },
         };
     }
     return originalLoad.call(this, request, parent, isMain);

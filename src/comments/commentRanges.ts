@@ -12,6 +12,7 @@ export type OverleafTextOperation = {
 
 export interface CommentRangeTransformResult {
     contentMismatchCount: number;
+    removedThreadIds: string[];
     ranges: OverleafCommentRange[];
 }
 
@@ -164,7 +165,7 @@ function applyInsertToCommentRange(
 function applyDeleteToCommentRange(
     range: OverleafCommentRange,
     op: OverleafTextOperation,
-): {contentMismatch: boolean, range: OverleafCommentRange} {
+): {anchorTextFullyDeleted: boolean, contentMismatch: boolean, range: OverleafCommentRange} {
     const nextRange = cloneCommentRange(range);
     const deletedText = op.d ?? '';
     const deleteStart = op.p;
@@ -174,11 +175,11 @@ function applyDeleteToCommentRange(
 
     if (deleteEnd <= commentStart) {
         nextRange.op.p -= deletedText.length;
-        return {contentMismatch: false, range: nextRange};
+        return {anchorTextFullyDeleted: false, contentMismatch: false, range: nextRange};
     }
 
     if (deleteStart >= commentEnd) {
-        return {contentMismatch: false, range: nextRange};
+        return {anchorTextFullyDeleted: false, contentMismatch: false, range: nextRange};
     }
 
     const remainingBefore = deleteStart <= commentStart
@@ -199,7 +200,11 @@ function applyDeleteToCommentRange(
     nextRange.op.p = Math.min(commentStart, deleteStart);
     nextRange.op.c = remainingBefore + remainingAfter;
 
-    return {contentMismatch, range: nextRange};
+    return {
+        anchorTextFullyDeleted: range.op.c.length > 0 && nextRange.op.c.length===0,
+        contentMismatch,
+        range: nextRange,
+    };
 }
 
 export function applyTextOperationToCommentRanges(
@@ -207,23 +212,32 @@ export function applyTextOperationToCommentRanges(
     op: OverleafTextOperation,
 ): CommentRangeTransformResult {
     let contentMismatchCount = 0;
-    const nextRanges = ranges.map((range) => {
+    const removedThreadIds: string[] = [];
+    const nextRanges = ranges.flatMap((range) => {
         if (typeof op.i === 'string') {
-            return applyInsertToCommentRange(range, op);
+            return [applyInsertToCommentRange(range, op)];
         }
         if (typeof op.d === 'string') {
             const result = applyDeleteToCommentRange(range, op);
             if (result.contentMismatch) {
                 contentMismatchCount += 1;
             }
-            return result.range;
+            if (result.anchorTextFullyDeleted) {
+                const threadId = result.range.op.t || result.range.id;
+                if (threadId) {
+                    removedThreadIds.push(threadId);
+                }
+                return [];
+            }
+            return [result.range];
         }
-        return cloneCommentRange(range);
+        return [cloneCommentRange(range)];
     });
 
     if (typeof op.c === 'string' && typeof op.t === 'string') {
         return {
             contentMismatchCount,
+            removedThreadIds,
             ranges: upsertCommentRange(nextRanges, {
                 c: op.c,
                 p: op.p,
@@ -233,7 +247,7 @@ export function applyTextOperationToCommentRanges(
         };
     }
 
-    return {contentMismatchCount, ranges: nextRanges};
+    return {contentMismatchCount, removedThreadIds, ranges: nextRanges};
 }
 
 export function applyTextOperationsToCommentRanges(
@@ -243,6 +257,7 @@ export function applyTextOperationsToCommentRanges(
     if (!ops || ops.length===0) {
         return {
             contentMismatchCount: 0,
+            removedThreadIds: [],
             ranges: ranges.map(cloneCommentRange),
         };
     }
@@ -251,10 +266,15 @@ export function applyTextOperationsToCommentRanges(
         const result = applyTextOperationToCommentRanges(state.ranges, op);
         return {
             contentMismatchCount: state.contentMismatchCount + result.contentMismatchCount,
+            removedThreadIds: [
+                ...state.removedThreadIds,
+                ...result.removedThreadIds,
+            ],
             ranges: result.ranges,
         };
     }, {
         contentMismatchCount: 0,
+        removedThreadIds: [],
         ranges: ranges.map(cloneCommentRange),
     });
 }

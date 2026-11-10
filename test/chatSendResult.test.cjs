@@ -35,15 +35,27 @@ test('classifyOverleafChatSendFailure treats 429 responses as rate limiting', ()
     }), 'rate-limited');
 });
 
-test('buildOverleafChatSendFailure normalizes preview text for server errors', () => {
+test('buildOverleafChatSendFailure keeps server response previews out of user-facing messages', () => {
     const failure = buildOverleafChatSendFailure({
         statusCode: 500,
-        responseBody: '<html> Internal server error </html>',
+        responseBody: '<html> Internal server error for private-project-name </html>',
         route: 'project/123/messages',
     });
     assert.equal(failure.code, 'server-error');
     assert.equal(failure.route, 'project/123/messages');
-    assert.equal(failure.responsePreview, 'Internal server error');
+    assert.equal(failure.responsePreview, 'Internal server error for private-project-name');
+    assert.equal(failure.message, 'Unable to send the Overleaf chat message due to an Overleaf server error. (500)');
+    assert.equal(failure.message.includes('private-project-name'), false);
+});
+
+test('formatOverleafChatSendFailureMessage does not append server previews', () => {
+    assert.equal(
+        formatOverleafChatSendFailureMessage('validation-failed', (message) => message, {
+            responsePreview: 'validation details mentioning private text',
+            statusCode: 422,
+        }),
+        'Unable to send the Overleaf chat message because Overleaf rejected the message payload. (422)',
+    );
 });
 
 test('formatOverleafChatSendFailureMessage preserves the connecting message', () => {
@@ -52,4 +64,3 @@ test('formatOverleafChatSendFailureMessage preserves the connecting message', ()
         'Overleaf chat is still connecting. Try again in a moment.',
     );
 });
-

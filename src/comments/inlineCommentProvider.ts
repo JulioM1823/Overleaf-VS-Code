@@ -1745,9 +1745,6 @@ export class InlineCommentProvider {
             const fallbackStartCharacter = Math.max(0, line.text.length - 1);
             return new vscode.Range(position.line, fallbackStartCharacter, position.line, line.text.length);
         }
-        if (!line.rangeIncludingLineBreak.isEqual(line.range)) {
-            return new vscode.Range(position.line, clampedStartCharacter, position.line + 1, 0);
-        }
         return new vscode.Range(position.line, 0, position.line, 0);
     }
 
@@ -2321,7 +2318,6 @@ export class InlineCommentProvider {
                     }, error);
                 });
             }
-            await this.suppressAutomaticCommentsPanelActivation(reason);
             const vfs = await this.getReadyCommentVfs(binding.overleafUri, reason);
             pendingCreatedThreadFocusRequestId = this.enqueuePendingCreatedCommentFocus(
                 renderUri,
@@ -4939,15 +4935,15 @@ export class InlineCommentProvider {
         const permissions = vfs.getCommentThreadPermissions(comment.overleafThreadId);
         const canDeleteComment = permissions.canDeleteComment?.(comment.overleafUserId) ?? false;
         const ownOnly = !canDeleteComment || !permissions.resolveAllComments;
-        await vfs.deleteComment(comment.overleafThreadId, comment.overleafMessageId, ownOnly);
+        const deleted = await vfs.deleteComment(comment.overleafThreadId, comment.overleafMessageId, ownOnly);
         EventBus.fire('reviewLocalMutationEvent', {
-            kind: 'deleteMessage',
+            kind: deleted==='thread' ? 'deleteThread' : 'deleteMessage',
             messageId: comment.overleafMessageId,
             origin: vfs.origin.toString(),
             threadId: comment.overleafThreadId,
         });
         ReviewViewProvider.notifyLocalMutationForOrigin(vfs.origin.toString(), {
-            kind: 'deleteMessage',
+            kind: deleted==='thread' ? 'deleteThread' : 'deleteMessage',
             messageId: comment.overleafMessageId,
             threadId: comment.overleafThreadId,
         });
@@ -5198,14 +5194,28 @@ export class InlineCommentProvider {
                 uri: uriKey,
             });
         }
-        const snapshot = this.snapshotsByUri.get(uriKey);
+        let snapshot = this.snapshotsByUri.get(uriKey);
+        if (snapshot && result.removedThreadIds.length > 0) {
+            const removedThreadIds = new Set(result.removedThreadIds);
+            snapshot = {
+                ...snapshot,
+                threads: snapshot.threads.filter((entry) => !removedThreadIds.has(entry.range.op.t)),
+            };
+            this.snapshotsByUri.set(uriKey, snapshot);
+            this.logDiagnostic('render.transient_threads_removed_after_anchor_delete', {
+                removedThreadCount: removedThreadIds.size,
+                removedThreadIds: Array.from(removedThreadIds).sort((left, right) => left.localeCompare(right)),
+                uri: uriKey,
+            });
+        }
         if (snapshot) {
+            const snapshotToRender = snapshot;
             void this.resolveOverleafProjectUri(event.document.uri).then((overleafUri) => {
                 if (!overleafUri) {
                     return;
                 }
                 return this.runWithSerializedRender(event.document.uri, 'transient_document_change', () => {
-                    return this.renderUri(event.document.uri, overleafUri, snapshot, 'transient_document_change');
+                    return this.renderUri(event.document.uri, overleafUri, snapshotToRender, 'transient_document_change');
                 });
             });
         }

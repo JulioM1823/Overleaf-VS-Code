@@ -76,3 +76,24 @@ index 0dfa483..d878bbb 100644
  
      this.websocket.onopen = function () {
        self.onOpen();
+diff --git a/node_modules/socket.io-client/lib/util.js b/node_modules/socket.io-client/lib/util.js
+--- a/node_modules/socket.io-client/lib/util.js
++++ b/node_modules/socket.io-client/lib/util.js
+@@ -350,7 +350,7 @@
+    * @api public
+    */
+
+-  util.ua.webkit = 'undefined' != typeof navigator
++  util.ua.webkit = 'document' in global && 'undefined' != typeof navigator
+     && /webkit/i.test(navigator.userAgent);
+
+    /**
+@@ -359,7 +359,7 @@
+    * @api public
+    */
+
+-  util.ua.iDevice = 'undefined' != typeof navigator
++  util.ua.iDevice = 'document' in global && 'undefined' != typeof navigator
+       && /iPad|iPhone|iPod/i.test(navigator.userAgent);
+
+ })('undefined' != typeof io ? io : module.exports, this);

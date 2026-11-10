@@ -1,0 +1,15 @@
+{
+  "name": "overleaf-comments-pdf-audit-driver",
+  "publisher": "overleaf-audit",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "main": "index.cjs",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "extensionDependencies": [
+    "AstroJulio.orbitleaf"
+  ]
+}

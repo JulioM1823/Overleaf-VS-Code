@@ -1,7 +1,8 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 import * as vscode from 'vscode';
-import * as DiffMatchPatch from 'diff-match-patch';
+import { mergeTextFromCommonBase } from '../core/threeWayMerge';
 import { EventEmitter } from 'events';
+import { randomUUID } from 'crypto';
 import { BaseAPI, Identity, ProjectMessageResponseSchema, ProjectSettingsSchema } from './base';
 import { reconstructDocumentFromDiff } from './docDiff';
 import { DocumentEntity, FileEntity, ProjectEntity, VirtualFileSystem } from '../core/remoteFileSystemProvider';
@@ -52,30 +53,22 @@ type ListenEventsSupport = {
     'new-chat-message': {message:ProjectMessageResponseSchema},    
 };
 
-class SyncTimer {
+export class SyncTimer {
     private timer?: NodeJS.Timeout;
-
-    constructor(
-        private _interval: number,
-        private readonly _callback: () => Promise<void>,
-    ) {
-        this._callback().then(() => this.trigger());
+    private stopped = false;
+    constructor(private _interval: number, private readonly _callback: () => Promise<void>) {
+        void this.run();
     }
-
-    private trigger() {
-        this.timer = setTimeout(async () => {
-            await this._callback();
-            this.trigger();
-        }, this._interval);
+    private async run() {
+        if (this.stopped) { return; }
+        try { await this._callback(); }
+        catch (error) { logDiagnostic('SocketIOAlt', 'poll.failed', {}, error); }
+        finally {
+            if (!this.stopped) { this.timer = setTimeout(() => void this.run(), Math.max(1000, this._interval)); }
+        }
     }
-
-    set interval(value: number) {
-        this._interval = value;
-    }
-
-    stop() {
-        this.timer && clearTimeout(this.timer);
-    }
+    set interval(value: number) { if (Number.isFinite(value) && value > 0) { this._interval = value; } }
+    stop() { this.stopped = true; clearTimeout(this.timer); }
 }
 
 export class SocketIOAlt {
@@ -89,6 +82,11 @@ export class SocketIOAlt {
     private connectedUsers: UpdateUserSchema[] = [];
 
     private snapshotAttemptId = 0;
+    private disconnected = false;
+    private bootstrapTimer?: NodeJS.Timeout;
+    private refreshPromise?: Promise<void>;
+    private uploadPromise?: Promise<void>;
+    private uploading = false;
 
     constructor(
                 private readonly url:string,
@@ -97,14 +95,30 @@ export class SocketIOAlt {
                 private readonly projectId:string,
                 private readonly record: Promise<ProjectEntity>,
     ) {
-        setTimeout(async () => {
-            this._eventEmitter.emit('connect');
-            this._eventEmitter.emit('connectionAccepted', undefined, '');
-            this._eventEmitter.emit('joinProjectResponse', '', await this.record);
+        // Attach a rejection handler immediately, even if shutdown happens
+        // before the timer. Announce a connection only with a valid project.
+        const bootstrap = this.record.then(project => ({project}), error => ({error}));
+        this.bootstrapTimer = setTimeout(() => {
+            this.bootstrapTimer = undefined;
+            void bootstrap.then(result => {
+                if (this.disconnected) { return; }
+                if ('error' in result) {
+                    logDiagnostic('SocketIOAlt', 'bootstrap.failed', {}, result.error);
+                    this.emitEvent('connect_failed');
+                    return;
+                }
+                this.emitEvent('connect');
+                this.emitEvent('connectionAccepted', undefined, '');
+                this.emitEvent('joinProjectResponse', '', result.project);
+            });
         }, 10);
 
         this.vfsRefreshTask = new SyncTimer(this.historyRefreshInterval, this.refreshVFS.bind(this));
         this.watchConfigurationsDisposable = this.watchConfigurations();
+    }
+
+    private emitEvent(event: string, ...args: any[]) {
+        if (!this.disconnected) { this._eventEmitter.emit(event, ...args); }
     }
 
     private get randomEntityId(): string {
@@ -189,15 +203,35 @@ export class SocketIOAlt {
         return undefined;
     }
 
-    private async refreshVFS() {
+    private refreshVFS(): Promise<void> {
+        if (this.disconnected) { return Promise.resolve(); }
+        if (this.uploading && this.uploadPromise) {
+            // A full-file upload changes entity IDs and history. Poll only
+            // after those mutations settle; preflight already shared a poll.
+            return this.uploadPromise.then(() => this.refreshVFS(), () => this.refreshVFS());
+        }
+        if (!this.refreshPromise) {
+            this.refreshPromise = this.refreshVFSOnce().finally(() => { this.refreshPromise = undefined; });
+        }
+        return this.refreshPromise;
+    }
+
+    private async refreshVFSOnce() {
         const vfs = await this.vfs;
+        if (this.disconnected) { return; }
         const latestVersion = await vfs.getCurrentVersion();
+        if (this.disconnected) { return; }
+        if (!Number.isSafeInteger(latestVersion) || latestVersion<0 || this.vfsLocalVersion!==undefined && latestVersion<this.vfsLocalVersion) {
+            throw new Error('Invalid or stale project history version');
+        }
         if (this.vfsLocalVersion===undefined) { this.vfsLocalVersion = latestVersion; }
         if (latestVersion===this.vfsLocalVersion) { return; }
 
         const activeUsers = [];
         const diffs = (await vfs.getFileTreeDiff(this.vfsLocalVersion, latestVersion))?.diff;
-        for (const diff of diffs || []) {
+        if (!Array.isArray(diffs)) { throw new Error('Project history unavailable; checkpoint retained for retry'); }
+        for (const diff of diffs) {
+            if (this.disconnected) { return; }
             if (diff.operation===undefined) { continue; }
 
             // resolve entityId
@@ -221,7 +255,7 @@ export class SocketIOAlt {
                         pathParts.slice(0, pathParts.length-1).join('/'),
                         pathParts[pathParts.length-1] ];
                     const parentFolderId = (await vfs._resolveUri(vfs.pathToUri(parentFolder))).fileId;
-                    this._eventEmitter.emit('reciveNewDoc', parentFolderId, {
+                    this.emitEvent('reciveNewDoc', parentFolderId, {
                         _id: this.randomEntityId,
                         name,
                         type: 'doc',
@@ -230,7 +264,7 @@ export class SocketIOAlt {
                     break;
                 case 'removed':
                     if (entityId===undefined) { break; }
-                    this._eventEmitter.emit('removeEntity', entityId);
+                    this.emitEvent('removeEntity', entityId);
                     break;
                 case 'renamed':
                     if (entityId===undefined) { break; }
@@ -245,9 +279,9 @@ export class SocketIOAlt {
                     // notify rename or move
                     if (oldParentPath!==newParentPath) {
                         const newParentFolderId = (await vfs._resolveUri(vfs.pathToUri(newParentPath))).fileId;
-                        this._eventEmitter.emit('reciveEntityMove', entityId, newParentFolderId);
+                        this.emitEvent('reciveEntityMove', entityId, newParentFolderId);
                     } else {
-                        this._eventEmitter.emit('reciveEntityRename', entityId, newName);
+                        this.emitEvent('reciveEntityRename', entityId, newName);
                     }
                     break;
                 case 'edited':
@@ -259,22 +293,28 @@ export class SocketIOAlt {
                     if (_doc && _doc.isDirty) { await _doc.save(); }
                     // generate patch and apply locally
                     const vfsLocalVersion = this.vfsLocalVersion!;
-                    const dmp = new DiffMatchPatch();
                     const localContent = new TextDecoder().decode( await vfs.openFile(_uri) );
                     const baseRemoteContent = await this.readDocSnapshot(vfs, pathname, vfsLocalVersion);
                     const latestRemoteContent = await this.readDocSnapshot(vfs, pathname, latestVersion);
                     if (baseRemoteContent!==undefined && latestRemoteContent!==undefined) {
-                        const patch = dmp.patch_make(baseRemoteContent, latestRemoteContent);
-                        const [localContentPatched, _] = dmp.patch_apply(patch, localContent);
-                        this._eventEmitter.emit('otUpdateApplied', {
+                        const merged = mergeTextFromCommonBase(baseRemoteContent, localContent, latestRemoteContent);
+                        if (merged.kind==='conflict') {
+                            await vfs.recordDocumentSyncConflict({
+                                baseContent: Buffer.from(baseRemoteContent), localContent: Buffer.from(localContent),
+                                remoteContent: Buffer.from(latestRemoteContent), relPath: pathname,
+                                docId: entityId, reason: 'alternative_connection_concurrent_changes',
+                            });
+                            throw new Error('Alternative connection has conflicting document edits; recovery required');
+                        }
+                        this.emitEvent('otUpdateApplied', {
                             doc: entityId,
                             v: (entity as DocumentEntity).version, //bypass update check
                             op: [
-                                {p:0, d:localContent},
-                                {p:0, i:localContentPatched},
+                                {p:0, d:(entity as DocumentEntity).remoteCache ?? baseRemoteContent},
+                                {p:0, i:latestRemoteContent},
                             ],
                         });
-                    }
+                    } else { throw new Error('Document history unavailable; checkpoint retained for retry'); }
                     // fetch active users
                     let row = 0, column = 0;
                     const remoteDiffs = (await vfs.getFileDiff(pathname, vfsLocalVersion, latestVersion))?.diff;
@@ -307,65 +347,134 @@ export class SocketIOAlt {
         }
         // notify user update/disconnected
         activeUsers.forEach(user => {
-            this._eventEmitter.emit('clientTracking.clientUpdated', user);
+            this.emitEvent('clientTracking.clientUpdated', user);
         });
         this.connectedUsers = this.connectedUsers.filter(user => {
             const DisconnectionTimeout = vscode.workspace.getConfiguration(ROOT_NAME).get<number>(keyInactiveTimeout, 180) * 1000;//ms
             const isDisconnected = Date.now() - (user.last_updated_at||Date.now()) > DisconnectionTimeout;
             if (isDisconnected) {
-                this._eventEmitter.emit('clientTracking.clientDisconnected', user.id);
+                this.emitEvent('clientTracking.clientDisconnected', user.id);
             }
             return !isDisconnected;
         });
         // update local version
-        this.vfsLocalVersion = latestVersion;
+        if (!this.disconnected) { this.vfsLocalVersion = latestVersion; }
     }
 
     get unSyncedChanges(): number {
         return Object.keys(this.localChangesPath).length;
     }
 
-    async uploadToVFS() {
+    uploadToVFS(): Promise<void> {
+        if (this.disconnected) { return Promise.reject(new Error('Connection closed; pending changes are retained')); }
+        if (!this.uploadPromise) {
+            this.uploadPromise = this.uploadToVFSOnce().finally(() => { this.uploading = false; this.uploadPromise = undefined; });
+        }
+        return this.uploadPromise;
+    }
+
+    private async uploadToVFSOnce() {
+        if (!this.unSyncedChanges) { return; }
+        const copies = vscode.l10n.t('Upload recovery copies');
+        const upload = vscode.l10n.t('Upload changes');
+        const choice = await vscode.window.showWarningMessage(
+            vscode.l10n.t('Overleaf cannot atomically check revisions for alternative-mode uploads. Recovery copies create new files and leave the originals and pending drafts unchanged. Upload changes replaces the originals and can overwrite concurrent edits; use it only after collaborators have stopped editing.'),
+            {modal: true}, copies, upload,
+        );
+        if (choice!==upload && choice!==copies) { throw new Error('Upload cancelled; pending changes are retained'); }
+        const recoveryCopies = choice===copies;
         const vfs = await this.vfs;
-        // sync remote changes
-        await this.refreshVFS();
+        // Replacement needs authoritative history. A new recovery copy does
+        // not modify the original, so unavailable history must not block it.
+        // Still let an already-running poll settle before mutating the tree.
+        if (!recoveryCopies) {
+            await this.refreshVFS();
+        } else if (this.refreshPromise) {
+            await this.refreshPromise.catch(error => {
+                logDiagnostic('SocketIOAlt', 'copy.history_refresh_failed', {}, error);
+            });
+        }
+        if (this.disconnected) { throw new Error('Connection closed; pending changes are retained'); }
+        this.uploading = true;
         // upload local changes
-        vscode.window.withProgress({
+        return vscode.window.withProgress({
             // Alternative-socket uploads are part of the background sync path;
             // keep progress out of popup notifications to avoid routine spam.
             location: vscode.ProgressLocation.Window,
             title: vscode.l10n.t('Uploading Changes'),
             cancellable: true,
         }, async (progress, token) => {
-            token.onCancellationRequested(() => {});
+            const failures: string[] = [];
+            const uploadedCopies: string[] = [];
             // do the upload
             const totalChanges = Object.keys(this.localChangesPath).length;
             let increment = 0;
             for (const [path,{parentFolderId,filename}] of Object.entries(this.localChangesPath)) {
+                if (token.isCancellationRequested || this.disconnected) { throw new Error('Upload cancelled; pending changes are retained'); }
                 try {
                     const fileContent = Buffer.from(await vfs.openFile( vfs.pathToUri(path) ));
                     progress.report({increment, message:`${path}`});
-                    const fileEntity = (await this.api.uploadFile(this.identity, this.projectId, parentFolderId, filename, fileContent)).entity!;
+                    // Keep the extension for Overleaf's file-type detection. A
+                    // fresh unpredictable name prevents a retry replacing a
+                    // previously uploaded copy after an uncertain response.
+                    const dot = filename.lastIndexOf('.');
+                    const hasExtension = dot>0 && filename.length - dot<=20;
+                    const extension = hasExtension ? filename.slice(dot) : '';
+                    const stem = hasExtension ? filename.slice(0, dot) : filename;
+                    const suffix = `.recovery-${randomUUID()}${extension}`;
+                    let boundedStem = '';
+                    if (recoveryCopies) {
+                        for (const character of stem) {
+                            if (boundedStem.length + character.length > 150 - suffix.length) { break; }
+                            boundedStem += character;
+                        }
+                    }
+                    const uploadName = recoveryCopies ? boundedStem + suffix : filename;
+                    const uploaded = await this.api.uploadFile(this.identity, this.projectId, parentFolderId, uploadName, fileContent);
+                    if (uploaded.type!=='success' || !uploaded.entity) { throw new Error('Upload was not confirmed'); }
+                    if (recoveryCopies && uploaded.entity.name!==uploadName) { throw new Error('Recovery copy name was not confirmed'); }
+                    const currentContent = recoveryCopies ? undefined : Buffer.from(await vfs.openFile(vfs.pathToUri(path)));
+                    if (currentContent) {
+                        // Persist edits before publishing a replacement entity.
+                        await vfs.persistTextDocumentDraft(vfs.pathToUri(path), currentContent.toString('utf8'), fileContent.toString('utf8'));
+                    }
+                    const fileEntity = uploaded.entity;
                     // update local entityId
                     if (fileEntity._type==='doc') {
-                        this._eventEmitter.emit('reciveNewDoc', parentFolderId, fileEntity);
+                        this.emitEvent('reciveNewDoc', parentFolderId, fileEntity);
                     } else if (fileEntity._type==='file') {
-                        this._eventEmitter.emit('reciveNewFile', parentFolderId, fileEntity);
+                        this.emitEvent('reciveNewFile', parentFolderId, fileEntity);
                     }
-                    delete this.localChangesPath[path];
+                    if (recoveryCopies) {
+                        uploadedCopies.push(uploadName);
+                        // This copy is not a commit of the original document.
+                        // Preserve its base, journal and pending path.
+                        continue;
+                    }
+                    if (currentContent?.equals(fileContent)) { delete this.localChangesPath[path]; }
                 } catch (error) {
-                    vscode.window.showErrorMessage(`${vscode.l10n.t('Failed to upload')}: ${path}`);
+                    failures.push(path);
+                    logDiagnostic('SocketIOAlt', 'upload.failed', {path}, error);
                 } finally {
                     increment += 100 * (1 / totalChanges);
                 }
             }
+            if (failures.length > 0) { throw new Error(`${failures.length} uploads failed; pending changes are retained`); }
+            if (recoveryCopies) {
+                void vscode.window.showInformationMessage(vscode.l10n.t('{count} recovery copies uploaded. Original files and pending drafts are unchanged.', {count: uploadedCopies.length}));
+                return;
+            }
             // update local version
-            this.vfsLocalVersion = await vfs.getCurrentVersion();
+            await vfs.requestRealtimeRecovery('document_version_mismatch');
             return Promise.resolve();
         });
     }
 
     disconnect() {
+        if (this.disconnected) { return; }
+        this.disconnected = true;
+        clearTimeout(this.bootstrapTimer);
+        this.bootstrapTimer = undefined;
         this.watchConfigurationsDisposable.dispose();
         this.vfsRefreshTask.stop();
         this._eventEmitter.emit('disconnect');
@@ -373,6 +482,14 @@ export class SocketIOAlt {
 
     removeAllListeners(event?: string) {
         this._eventEmitter.removeAllListeners(event);
+    }
+
+    async stageDocument(docId: string) {
+        const vfs = await this.vfs;
+        const resolved = vfs._resolveById(docId);
+        if (!resolved) { throw new Error('Cannot buffer changes to a missing document'); }
+        const {parentFolder, path} = resolved;
+        this.localChangesPath[path.slice(1)] = {parentFolderId: parentFolder._id, filename: path.slice(path.lastIndexOf('/')+1)};
     }
 
     emit(event: string, ...parameters: any): void {
@@ -383,43 +500,36 @@ export class SocketIOAlt {
             case 'joinProject':
                 this.record.then((project) => {
                     callback(undefined, project);
-                });
+                }).catch(callback);
                 break;
             case 'joinDoc':
                 const rDocId = args[0] as string;
-                this.vfs.then(async (vfs) => {
+                Promise.resolve(this.vfs).then(async (vfs) => {
                     await vfs.init();
                     const {path} = await vfs._resolveById(rDocId)!;
                     const version = this.vfsLocalVersion ?? await vfs.getCurrentVersion();
                     this.vfsLocalVersion = version;
                     const content = await this.readDocSnapshot(vfs, path.slice(1), version);
-                    const docLines = content?.split('\n') || [];
+                    if (content===undefined) { throw new Error('Document snapshot unavailable'); }
+                    const docLines = content.split('\n');
                     const updates:any[]=[], ranges:any[]=[];
                     callback(undefined, docLines, version, updates, ranges);
-                });
+                }).catch(callback);
                 break;
             case 'applyOtUpdate':
                 const uDocId = args[0];
                 const update = args[1] as UpdateSchema;
                 if (update.op?.length) {
-                    this.vfs.then(async (vfs) => {
-                        await vfs.init();
-                        const {parentFolder, path} = await vfs._resolveById(uDocId)!;
-                        const parentFolderId = parentFolder._id;
-                        const filename = path.slice(path.lastIndexOf('/')+1);
-                        this.localChangesPath[ path.slice(1) ] = {parentFolderId, filename};
+                    this.stageDocument(uDocId).then(() => {
                         callback(undefined, undefined);
-                    });
+                    }).catch(callback);
                 } else {
                     callback(undefined, undefined);
                 }
                 break;
             case 'leaveDoc':
-                const wDocId = args[0];
-                this.vfs.then(async (vfs) => {
-                    await this.uploadToVFS();
-                    callback(undefined, undefined);
-                });
+                // Closing an editor must not overwrite remote files implicitly.
+                callback(undefined, undefined);
                 break;
             case 'clientTracking.getConnectedUsers':
                     callback(undefined, []);

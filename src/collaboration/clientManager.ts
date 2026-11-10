@@ -14,6 +14,7 @@ import {
     CollaboratorCursorLocation,
     createCollaboratorQuickPickItem,
     didCollaboratorMove,
+    escapeCollaboratorMarkdownText,
     formatCollaboratorCursorInfo,
     resolveCollaboratorCursorColor,
     resolveCollaboratorConnectionIndicatorState,
@@ -310,9 +311,9 @@ export class ClientManager {
         };
     }
 
-    private createCollaboratorHoverMessage(user: ExtendedUpdateUserSchema, color: string) {
-        const hoverMessage = new vscode.MarkdownString(`<span style="color:${color};"><b>${user.name}</b></span>`);
-        hoverMessage.supportHtml = true;
+    private createCollaboratorHoverMessage(user: ExtendedUpdateUserSchema) {
+        const hoverMessage = new vscode.MarkdownString();
+        hoverMessage.appendMarkdown(`**${escapeCollaboratorMarkdownText(user.name)}**`);
         return hoverMessage;
     }
 
@@ -370,7 +371,7 @@ export class ClientManager {
 
         if (user.selection===undefined) {
             const color = this.resolveCollaboratorColor(presenceKey);
-            const hoverMessage = this.createCollaboratorHoverMessage(user, color);
+            const hoverMessage = this.createCollaboratorHoverMessage(user);
             user.selection = {
                 color,
                 decoration: this.createCollaboratorCursorDecoration(color),
@@ -378,7 +379,7 @@ export class ClientManager {
                 ranges: this.createCollaboratorCursorRanges(user.row, user.column, color, hoverMessage, newEditor?.document),
             };
         } else {
-            user.selection.hoverMessage = this.createCollaboratorHoverMessage(user, user.selection.color);
+            user.selection.hoverMessage = this.createCollaboratorHoverMessage(user);
             user.selection.ranges = this.createCollaboratorCursorRanges(
                 user.row,
                 user.column,
@@ -945,26 +946,35 @@ export class ClientManager {
                         const tetheredUser = this.tetheredClientId ? this.onlineUsers[this.tetheredClientId] : undefined;
                         const statusSummary = this.activeExists? vscode.l10n.t('Active'): vscode.l10n.t('Idle');
                         const tetheredSummary = tetheredUser ? ` (${vscode.l10n.t('Following {name}', {name: tetheredUser.name})})` : '';
-                        tooltip.appendMarkdown(`${ELEGANT_NAME}: ${statusSummary}${tetheredSummary}\n\n`);
+                        tooltip.appendText(`${ELEGANT_NAME}: ${statusSummary}${tetheredSummary}`);
+                        tooltip.appendMarkdown('\n\n');
                         const tooltipParts = [`summary:${statusSummary}${tetheredSummary}`];
+                        const insertTextCommand = `${ROOT_NAME}.collaboration.insertText`;
+                        const jumpToUserCommand = `${ROOT_NAME}.collaboration.jumpToUser`;
 
                         Object.values(this.onlineUsers).forEach(user => {
                             const userArgs = JSON.stringify([`@[[${user.name}#${user.user_id}]] `]);
-                            const userCommandUri = vscode.Uri.parse(`command:${ROOT_NAME}.collaboration.insertText?${encodeURIComponent(userArgs)}`);
-                            const userInfo = `<a href=${userCommandUri}>@<span style="color:${user.selection?.color};"><b>${user.name}</b></span></a>`;
+                            const userCommandUri = vscode.Uri.parse(`command:${insertTextCommand}?${encodeURIComponent(userArgs)}`);
+                            const userInfo = `[@${escapeCollaboratorMarkdownText(user.name)}](${userCommandUri})`;
 
                             const jumpArgs = JSON.stringify([user.id]);
-                            const jumpCommandUri = vscode.Uri.parse(`command:${ROOT_NAME}.collaboration.jumpToUser?${encodeURIComponent(jumpArgs)}`);
+                            const jumpCommandUri = vscode.Uri.parse(`command:${jumpToUserCommand}?${encodeURIComponent(jumpArgs)}`);
                             const cursorInfo = this.getUserCursorInfo(user);
-                            const cursorMarkdown = cursorInfo ? ` at <a href="${jumpCommandUri}">${cursorInfo}</a>` : '';
+                            const cursorMarkdown = cursorInfo ? ` at [${escapeCollaboratorMarkdownText(cursorInfo)}](${jumpCommandUri})` : '';
                 
                             const since_last_update = user.last_updated_at ? formatTime(Date.now() - user.last_updated_at) : '';
                             const timeInfo = since_last_update==='' ? vscode.l10n.t('Just now') : vscode.l10n.t('{since_last_update} ago', {since_last_update});
-                            tooltip.appendMarkdown(`${userInfo}${cursorMarkdown} ${timeInfo}\n\n`);
+                            tooltip.appendMarkdown(`${userInfo}${cursorMarkdown}`);
+                            tooltip.appendText(` ${timeInfo}`);
+                            tooltip.appendMarkdown('\n\n');
                             tooltipParts.push(`${user.id}:${cursorInfo ?? ''}:${timeInfo}:${user.selection?.color ?? ''}`);
                         });
-                        tooltip.isTrusted = true;
-                        tooltip.supportHtml = true;
+                        tooltip.isTrusted = {
+                            enabledCommands: [
+                                insertTextCommand,
+                                jumpToUserCommand,
+                            ],
+                        };
                         this.applyStatusPresentation({
                             backgroundColorId,
                             color,

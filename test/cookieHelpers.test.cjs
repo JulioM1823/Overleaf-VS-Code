@@ -34,3 +34,17 @@ test('mergeCookieHeaders can bootstrap a cookie header from set-cookie values al
         'sharelatex.sid=s%3Aabc.def',
     );
 });
+
+test('cookie helpers reject unsafe header characters and malformed names', () => {
+    assert.equal(
+        normalizeCookieHeader('Cookie: overleaf_session2=session\r\nX-Leak: yes; GCLB=sticky'),
+        '',
+    );
+    assert.equal(
+        mergeCookieHeaders('safe=ok; bad name=value', [
+            'evil=bad\r\nSet-Cookie: injected=1; Path=/',
+            'good=new; Path=/; HttpOnly',
+        ]),
+        'safe=ok; good=new',
+    );
+});

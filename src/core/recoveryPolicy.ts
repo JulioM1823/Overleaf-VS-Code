@@ -3,7 +3,7 @@ export function calculateRecoveryDelayMs(retryConnection: number) {
     if (retryCount <= 1) {
         return 0;
     }
-    return Math.min(1000 * 2 ** (retryCount - 2), 5000);
+    return Math.min(1000 * 2 ** (retryCount - 2), 30000);
 }
 
 export function extractOutputBuildId(outputs: Array<{url?: string}>) {

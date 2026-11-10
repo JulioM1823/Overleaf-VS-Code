@@ -1,5 +1,5 @@
 <script setup lang="ts">
-    import { ref, watchEffect, type Ref } from 'vue';
+    import { onUnmounted, ref, watchEffect, type Ref } from 'vue';
     import { type Message } from '../utils';
     import MessageItem from './MessageItem.vue';
 
@@ -13,9 +13,10 @@
     const messageRecord: Ref<{[index:number]:string}> = ref({});
 
     const now = ref(Date.now());
-    setInterval(() => {
+    const clockTimer = setInterval(() => {
         now.value = Date.now();
     }, 10 * 1000);
+    onUnmounted(() => clearInterval(clockTimer));
 
     watchEffect(() => {
         if (messageContainer.value) {

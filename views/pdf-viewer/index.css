@@ -39,6 +39,19 @@ html, body {
     animation: overleaf-workshop-sync-highlight-fade 1.6s ease-out forwards;
 }
 
+#overleaf-pdf-error {
+    position: fixed;
+    top: 36px;
+    left: 12px;
+    right: 12px;
+    padding: 12px;
+    border: 1px solid #b15b00;
+    background: #fff4d6;
+    color: #342000;
+    z-index: 10000;
+    font: 13px/1.5 sans-serif;
+}
+
 @keyframes overleaf-workshop-sync-highlight-fade {
     0% {
         opacity: 0;

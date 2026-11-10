@@ -1,3 +1,4 @@
+import { assertSafeLocalPath, writePrivateFile } from '../utils/safeFile';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { minimatch } from 'minimatch';
@@ -20,10 +21,12 @@ import {
 } from './localReplicaSyncState';
 import {
     ensureLocalReplicaCompileWorkspaceDefaults,
+    ensureLocalReplicaMetadataDirectory,
     LocalReplicaWorkspaceSettings,
     mapOverleafPathToLocalReplicaFileUri,
     readLocalReplicaSettingsFromWorkspaceRoot,
     sanitizeLocalReplicaProjectFolderName,
+    splitSafeProjectPath,
     writeLocalReplicaSettingsToWorkspaceRoot,
 } from './localReplicaWorkspace';
 import { shouldDeferLocalReplicaFileSyncToManagedSession } from './localReplicaManagedSessionPolicy';
@@ -32,6 +35,9 @@ import {
     isLocalReplicaMetadataPath,
     shouldRehydrateEmptyLocalReplicaFromRemote,
 } from './localReplicaDeletionPolicy';
+import {
+    restrictPrivateFilePermissions,
+} from '../utils/filePrivacy';
 
 const IGNORE_SETTING_KEY = 'ignore-patterns';
 const SETTINGS_DIR_NAME = '.overleaf';
@@ -297,18 +303,25 @@ export class LocalReplicaSCMProvider extends BaseSCM {
     }
 
     private normalizeRelPath(relPath: string): string {
-        if (relPath==='' || relPath==='/') {
+        const segments = splitSafeProjectPath(relPath);
+        if (segments === undefined) {
+            throw vscode.FileSystemError.NoPermissions(vscode.l10n.t('Unsafe local replica path.'));
+        }
+        if (segments.length===0) {
             return '/';
         }
-        return relPath.startsWith('/') ? relPath : `/${relPath}`;
+        return `/${segments.join('/')}`;
     }
 
     private localUriForRelPath(relPath: string): vscode.Uri {
-        const normalizedRelPath = this.normalizeRelPath(relPath);
-        if (normalizedRelPath==='/') {
+        const segments = splitSafeProjectPath(relPath);
+        if (segments === undefined) {
+            throw vscode.FileSystemError.NoPermissions(vscode.l10n.t('Unsafe local replica path.'));
+        }
+        if (segments.length===0) {
             return this.baseUri;
         }
-        return this.baseUri.with({path: `${this.baseUri.path}${normalizedRelPath}`});
+        return vscode.Uri.joinPath(this.baseUri, ...segments);
     }
 
     private relPathFromLocalUri(localUri: vscode.Uri): string {
@@ -552,7 +565,7 @@ export class LocalReplicaSCMProvider extends BaseSCM {
             settingsUri: this.settingUri.toString(),
             syncStateUri: this.syncStateUri.toString(),
         });
-        await vscode.workspace.fs.createDirectory(this.settingsDirUri);
+        await ensureLocalReplicaMetadataDirectory(this.settingsDirUri);
         try {
             await vscode.workspace.fs.stat(this.settingUri);
         } catch (error) {
@@ -757,8 +770,9 @@ export class LocalReplicaSCMProvider extends BaseSCM {
             ),
             version: 1,
         });
-        await vscode.workspace.fs.createDirectory(this.settingsDirUri);
-        await vscode.workspace.fs.writeFile(this.syncStateUri, Buffer.from(raw));
+        await ensureLocalReplicaMetadataDirectory(this.settingsDirUri);
+        await writePrivateFile(this.syncStateUri, Buffer.from(raw));
+        await restrictPrivateFilePermissions(this.syncStateUri);
         this.stateDirty = false;
         this.logDiagnostic('state.persist_completed', {
             pathCount: this.syncState.size,
@@ -769,6 +783,7 @@ export class LocalReplicaSCMProvider extends BaseSCM {
 
     private async snapshotPath(endpoint: ReplicaEndpoint, relPath: string): Promise<ReplicaPathEntry> {
         const uri = this.getReplicaUri(endpoint, relPath);
+        if (endpoint==='local') { await assertSafeLocalPath(this.baseUri, uri); }
         try {
             const stat = await vscode.workspace.fs.stat(uri);
             if (stat.type===vscode.FileType.Directory) {
@@ -830,6 +845,7 @@ export class LocalReplicaSCMProvider extends BaseSCM {
         while (queue.length!==0) {
             const nextRoot = queue.shift()!;
             const rootUri = this.getReplicaUri(endpoint, nextRoot);
+            if (endpoint==='local') { await assertSafeLocalPath(this.baseUri, rootUri); }
             let items: [string, vscode.FileType][];
             try {
                 items = await vscode.workspace.fs.readDirectory(rootUri);
@@ -863,6 +879,7 @@ export class LocalReplicaSCMProvider extends BaseSCM {
                 }
 
                 const uri = this.getReplicaUri(endpoint, relPath);
+                if (endpoint==='local') { await assertSafeLocalPath(this.baseUri, uri); }
                 if (type===vscode.FileType.Directory) {
                     paths.set(relPath, {
                         relPath,
@@ -913,6 +930,13 @@ export class LocalReplicaSCMProvider extends BaseSCM {
         await vscode.workspace.fs.createDirectory(uri.with({path: parentPath}));
     }
 
+    private async assertReplicaEntryUnchanged(endpoint: ReplicaEndpoint, entry: ReplicaPathEntry) {
+        const current = await this.snapshotPath(endpoint, entry.relPath);
+        if (!localReplicaSnapshotsEqual(current.snapshot, entry.snapshot)) {
+            throw vscode.FileSystemError.Unavailable('File changed during synchronization; retry with fresh snapshots.');
+        }
+    }
+
     private async writeReplicaFileContent(
         action: SyncAction,
         relPath: string,
@@ -921,6 +945,7 @@ export class LocalReplicaSCMProvider extends BaseSCM {
         reason: string,
         syncTaskId: number,
     ): Promise<'written' | 'offline' | 'recovery-required'> {
+        await this.assertReplicaEntryUnchanged(action==='pull' ? 'local' : 'remote', targetEntry);
         if (action==='push') {
             try {
                 const resolved = await this.vfs._resolveUri(targetEntry.uri);
@@ -933,6 +958,7 @@ export class LocalReplicaSCMProvider extends BaseSCM {
                         targetEntry.uri,
                         new TextDecoder().decode(content),
                         `${reason}:local_replica_push`,
+                        targetEntry.content ? new TextDecoder('utf-8', {fatal: true}).decode(targetEntry.content) : undefined,
                     );
                     this.logDiagnostic('sync.remote_doc_push_completed', {
                         reason,
@@ -943,7 +969,7 @@ export class LocalReplicaSCMProvider extends BaseSCM {
                     if (syncResult.kind==='applied' || syncResult.kind==='noop') {
                         return 'written';
                     }
-                    return syncResult.kind;
+                    return syncResult.kind==='queued' ? 'offline' : syncResult.kind;
                 }
             } catch (error) {
                 if (!LocalReplicaSCMProvider.isFileNotFoundError(error)) {
@@ -957,8 +983,10 @@ export class LocalReplicaSCMProvider extends BaseSCM {
                 }
             }
         }
+        if (action==='pull') { await assertSafeLocalPath(this.baseUri, targetEntry.uri); }
         await this.ensureParentDirectory(targetEntry.uri);
-        await vscode.workspace.fs.writeFile(targetEntry.uri, content);
+        if (action==='pull') { await writePrivateFile(targetEntry.uri, content); }
+        else { await vscode.workspace.fs.writeFile(targetEntry.uri, content); }
         return 'written';
     }
 
@@ -1030,6 +1058,8 @@ export class LocalReplicaSCMProvider extends BaseSCM {
                 }
             }
             try {
+                await this.assertReplicaEntryUnchanged(action==='pull' ? 'local' : 'remote', targetEntry);
+                if (action==='pull') { await assertSafeLocalPath(this.baseUri, targetEntry.uri); }
                 await vscode.workspace.fs.delete(targetEntry.uri, {recursive: true});
             } catch (error) {
                 if (!LocalReplicaSCMProvider.isFileNotFoundError(error)) {
@@ -1054,6 +1084,7 @@ export class LocalReplicaSCMProvider extends BaseSCM {
         }
 
         if (sourceEntry.snapshot.kind==='directory') {
+            if (action==='pull') { await assertSafeLocalPath(this.baseUri, targetEntry.uri); }
             await vscode.workspace.fs.createDirectory(targetEntry.uri);
             await this.setBaseline(relPath, sourceEntry.snapshot);
             this.logDiagnostic('sync.apply_completed', {
@@ -1194,8 +1225,11 @@ export class LocalReplicaSCMProvider extends BaseSCM {
         if (localEntry.snapshot.kind==='file' && remoteEntry.snapshot.kind==='file') {
             const mergeResult = mergeLocalReplicaText(baselineContent, localEntry.content!, remoteEntry.content!);
             if (mergeResult.kind==='merged') {
+                await this.assertReplicaEntryUnchanged('local', localEntry);
+                await this.assertReplicaEntryUnchanged('remote', remoteEntry);
+                await assertSafeLocalPath(this.baseUri, localEntry.uri);
                 await this.ensureParentDirectory(localEntry.uri);
-                await vscode.workspace.fs.writeFile(localEntry.uri, mergeResult.mergedContent);
+                await writePrivateFile(localEntry.uri, mergeResult.mergedContent);
                 const writeResult = await this.writeReplicaFileContent(
                     'push',
                     relPath,
@@ -1925,20 +1959,19 @@ export class LocalReplicaSCMProvider extends BaseSCM {
 
     writeFile(relPath: string, content: Uint8Array): Thenable<void> {
         const uri = this.localUriForRelPath(relPath);
-        return this.ensureParentDirectory(uri)
-            .then(() => vscode.workspace.fs.writeFile(uri, content));
+        return assertSafeLocalPath(this.baseUri, uri)
+            .then(() => this.ensureParentDirectory(uri))
+            .then(() => writePrivateFile(uri, content));
     }
 
-    readFile(relPath: string): Thenable<Uint8Array | undefined> {
+    async readFile(relPath: string): Promise<Uint8Array | undefined> {
         const uri = this.localUriForRelPath(relPath);
-        return new Promise(async (resolve) => {
-            try {
-                const content = await vscode.workspace.fs.readFile(uri);
-                resolve(content);
-            } catch {
-                resolve(undefined);
-            }
-        });
+        await assertSafeLocalPath(this.baseUri, uri);
+        try { return await vscode.workspace.fs.readFile(uri); }
+        catch (error) {
+            if (LocalReplicaSCMProvider.isFileNotFoundError(error)) { return undefined; }
+            throw error;
+        }
     }
 
     get triggers(): Promise<vscode.Disposable[]> {

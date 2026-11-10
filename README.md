@@ -1,100 +1,51 @@
-# Overleaf Workshop
+# Overleaf-VS Code
 
-[![GitHub Repo stars](https://img.shields.io/github/stars/overleaf-workshop/Overleaf-Workshop)](https://github.com/overleaf-workshop/Overleaf-Workshop)
-[![version](https://img.shields.io/visual-studio-marketplace/v/iamhyc.overleaf-workshop)](https://marketplace.visualstudio.com/items?itemName=iamhyc.overleaf-workshop)
-[![Visual Studio Marketplace Installs](https://img.shields.io/visual-studio-marketplace/i/iamhyc.overleaf-workshop)](https://marketplace.visualstudio.com/items?itemName=iamhyc.overleaf-workshop)
-[![updated](https://img.shields.io/visual-studio-marketplace/last-updated/iamhyc.overleaf-workshop)](https://marketplace.visualstudio.com/items?itemName=iamhyc.overleaf-workshop)
-[![release](https://img.shields.io/visual-studio-marketplace/release-date/iamhyc.overleaf-workshop)](https://vsmarketplacebadge.apphb.com/downloads-short/iamhyc.overleaf-workshop.svg)
+Work on Overleaf projects in VS Code with **real-time, bidirectional synchronization**: your edits reach Overleaf, and collaborators’ edits appear in your editor. Compile on your Overleaf server and view the PDF beside your source.
 
-Open Overleaf (ShareLatex) projects in VSCode, with full collaboration support.
+This extension is built on the source code of [Overleaf Workshop](https://github.com/overleaf-workshop/Overleaf-Workshop), developed by iamhyc and the Overleaf Workshop contributors.
 
-### User Guide
+Published by **AstroJulio**. Overleaf-VS Code is independently maintained and is not an official Overleaf product.
 
-The full user guide is available at [GitHub Wiki](https://github.com/overleaf-workshop/Overleaf-Workshop/wiki).
+## Real-time collaboration and offline editing
 
-### Features
+- **Real-time, bidirectional synchronization:** edit collaboratively across VS Code and Overleaf, with shared editing, chat, and comments synchronized while connected.
+- **Keep editing offline:** continue working on previously opened, cached documents when your connection drops. Offline edits are retained locally and automatically synchronized on reconnection. Compatible local and remote edits are merged; overlapping changes that cannot be merged safely require conflict resolution.
 
-> [!NOTE]
-> For SSO login or captcha enabled servers like `https://www.overleaf.com`, please use "**Login with Cookies**" method.
-> For more details, please refer to [How to Login with Cookies](#how-to-login-with-cookies).
+Open the project and the documents you need while online before going offline. Live chat, remote updates, and server compilation require a connection. Offline editing lets you keep contributing to a shared project; collaborators receive those changes after reconnection.
 
-- Login Server, Open Projects and Edit Files
+## Get started
 
-    <img src="https://raw.githubusercontent.com/overleaf-workshop/Overleaf-Workshop/master/docs/assets/demo01-login.gif" height=400px/>
+You need desktop **VS Code 1.80 or later**, an Overleaf account with access to a project, and an internet connection for initial setup and server features. Server compilation does not require a local TeX installation. Compatible self-hosted Overleaf servers are also supported.
 
-- On-the-fly Compiling and Previewing
-  > <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>B</kbd> to compile, <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd> preview.
+1. Install **Overleaf-VS Code** by **AstroJulio** from Extensions.
+2. Select **Overleaf-VS Code** in the Activity Bar. In **Projects**, right-click **www.overleaf.com** → **Login to Server** → **Login with Cookies**.
+3. Sign in to Overleaf in your browser and open its project dashboard. Open the browser's developer tools → **Network**, then reload the dashboard.
+4. Select the authenticated `project` request. Under request headers, copy the **Cookie** value. Paste it into Overleaf-VS Code's masked login input and press Enter. Treat this value like a password.
+5. Expand the server, right-click your project → **Open Project in Current Window**, then open the main `.tex` file.
+6. In the Command Palette, run **Overleaf-VS Code: Compile Project**, then **Overleaf-VS Code: View Compiled PDF**.
 
-    <img src="https://raw.githubusercontent.com/overleaf-workshop/Overleaf-Workshop/master/docs/assets/demo03-synctex.gif" height=400px/>
+For another server, run **Overleaf-VS Code: Add New Server** before signing in. To create a project, right-click the signed-in server → **New Project** → **Example Project**.
 
-- SyncTeX and Reverse SyncTeX
-  > <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>J</kbd> to jump to PDF.
-  > Double click on PDF to jump to source code
+## Edit, compile and read
 
-- Chat with Collaborators
+Compile-on-save is enabled by default. You can also compile with **⌘⌥B** on macOS or **Ctrl+Alt+B** on Windows/Linux. Open the PDF with **⌘⌥V** or **Ctrl+Alt+V**.
 
-    <img src="https://raw.githubusercontent.com/overleaf-workshop/Overleaf-Workshop/master/docs/assets/demo06-chat.gif" height=400px/>
+Use **Overleaf-VS Code: Jump to PDF** to navigate from source to PDF; double-click the PDF to return to source. **Overleaf-VS Code: Set Root Document** and **Overleaf-VS Code: Set Compiler** change the server build settings.
 
-- Open Project Locally, Compile/Preview with [LaTeX-Workshop](https://github.com/James-Yu/LaTeX-Workshop)
+Collaborate in real time with shared project editing, **Chat**, and comments in **Review** synchronized with Overleaf while connected. Available actions depend on your server and project permissions. LaTeX completion, formatting, and project search are also included.
 
-    <img src="https://raw.githubusercontent.com/overleaf-workshop/Overleaf-Workshop/master/docs/assets/demo07-local.gif" height=400px/>
+## Settings and local copies
 
-### How to Login with Cookies
+Search **Overleaf-VS Code** in Settings to adjust compile-on-save, the output folder, PDF colors, scrolling and page spreads.
 
-<img src="https://raw.githubusercontent.com/overleaf-workshop/Overleaf-Workshop/master/docs/assets/login_with_cookie.png" height=400px/>
+Right-click a project → **Open Project Locally ...** to work with a synchronized local copy. Server compilation still needs a connection. Offline local compilation requires **LaTeX Workshop** and a working local TeX installation.
 
-In an already logged-in browser (Firefox for example):
+## Source and license
 
-1. Open "Developer Tools" (usually by pressing <kbd>F12</kbd>) and switch to the "Network" tab;
+Overleaf-VS Code uses the **GNU Affero General Public License v3.0**. The installed extension includes the corresponding source for this exact version, build instructions and original license notices.
 
-   Then, navigate to the Overleaf main page (e.g., `https://www.overleaf.com`) in the address bar.
-
-2. Filter the listed items with `/project` and select the exact match.
-
-3. Check the "Cookie" under "Request Headers" of the selected item and copy its value to login.
-    > The format of the Cookie value would be like: `overleaf_session2=...` or `sharelatex.sid=...`
-
-### Compatibility
-
-The following Overleaf (ShareLatex) Community Edition docker images provided on [Docker Hub](https://hub.docker.com/r/sharelatex/sharelatex) have been tested and verified to be compatible with this extension.
-
-- [x] [sharelatex/sharelatex:5.0.4](https://hub.docker.com/layers/sharelatex/sharelatex/5.0.4/images/sha256-429f6c4c02d5028172499aea347269220fb3505cbba2680f5c981057ffa59316?context=explore) (verified by [@Mingbo-Lee](https://github.com/Mingbo-Lee))
-
-- [x] [sharelatex/sharelatex:4.2.4](https://hub.docker.com/layers/sharelatex/sharelatex/4.2.4/images/sha256-ac0fc6dbda5e82b9c979721773aa120ad3c4a63469b791b16c3711e0b937528c?context=explore)
-
-- [x] [sharelatex/sharelatex:4.1](https://hub.docker.com/layers/sharelatex/sharelatex/4.1/images/sha256-3798913f1ada2da8b897f6b021972db7874982b23bef162019a9ac57471bcee8?context=explore) (verified by [@iamhyc](https://github.com/iamhyc))
-
-- [x] [sharelatex/sharelatex:3.5](https://hub.docker.com/layers/sharelatex/sharelatex/3.5/images/sha256-f97fa20e45cdbc688dc051cc4b0e0f4f91ae49fd12bded047d236ca389ad80ac?context=explore) (verified by [@iamhyc](https://github.com/iamhyc))
-
-- [ ] [sharelatex/sharelatex:3.4](https://hub.docker.com/layers/sharelatex/sharelatex/3.4/images/sha256-2a72e9b6343ed66f37ded4e6da8df81ed66e8af77e553b91bd19307f98badc7a?context=explore)
-
-- [ ] [sharelatex/sharelatex:3.3](https://hub.docker.com/layers/sharelatex/sharelatex/3.3/images/sha256-e1ec01563d259bbf290de4eb90dce201147c0aae5a07738c8c2e538f6d39d3a8?context=explore)
-
-- [ ] [sharelatex/sharelatex:3.2](https://hub.docker.com/layers/sharelatex/sharelatex/3.2/images/sha256-5db71af296f7c16910f8e8939e3841dad8c9ac48ea0a807ad47ca690087f44bf?context=explore)
-
-- [ ] [sharelatex/sharelatex:3.1](https://hub.docker.com/layers/sharelatex/sharelatex/3.1/images/sha256-5b9de1e65257cea4682c1654af06408af7f9c0e2122952d6791cdda45705e84e?context=explore)
-
-- [ ] [sharelatex/sharelatex:3.0](https://hub.docker.com/layers/sharelatex/sharelatex/3.0/images/sha256-a36e54c66ef62fdee736ce2229289aa261b44f083a9fd553cf8264500612db27?context=explore)
-
-### Development
-
-Please refer to the development guidance in [CONTRIBUTING.md](./CONTRIBUTING.md)
-
-### Project Governance
-
-Repository governance and release operations are documented in [Governance and Release Operations](./docs/governance.md).
-
-The source repository is maintained under the `overleaf-workshop` organization, while the published extension currently remains `iamhyc.overleaf-workshop` for Marketplace continuity. Routine maintenance should happen through repository access, documentation, and workflow ownership rather than ad hoc extension-ID changes.
-
-Roadmap planning is tracked through GitHub issues and maintainer planning instead of a standing `v1.0.0` promise in the documentation.
-
-### References
-
-- [Overleaf Official Logos](https://www.overleaf.com/for/partners/logos)
-- [Overleaf Web Route List](./docs/webapi.md)
-- [James-Yu/LaTeX-Workshop](https://github.com/James-Yu/LaTeX-Workshop)
-- [jlelong/vscode-latex-basics](https://github.com/jlelong/vscode-latex-basics/tags)
+Run **Developer: Open Extensions Folder**, open `astrojulio.orbitleaf-<version>`, then open `source/README.md`. The source archive is in `source/`; the extension license and dependency notices are in `LICENSE.txt` and `THIRD_PARTY_NOTICES.md`.
 
 ## Source and issues
 
-Source code: [Overleaf-VS Code](https://github.com/JulioM1823/Overleaf-VS-Code). Report bugs in the [issue tracker](https://github.com/JulioM1823/Overleaf-VS-Code/issues).
+Source code: [Overleaf-VS-Code on GitHub](https://github.com/JulioM1823/Overleaf-VS-Code). Report bugs in the [issue tracker](https://github.com/JulioM1823/Overleaf-VS-Code/issues). Install the extension from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=AstroJulio.orbitleaf).

@@ -143,6 +143,11 @@ test('comment creation renders and focuses the final thread before persistence',
         /scheduleCommentMutationPanelSuppression|workbench\.action\.closePanel/,
         'Expected comment creation to avoid panel close/open side effects.',
     );
+    assert.doesNotMatch(
+        createBody,
+        /suppressAutomaticCommentsPanelActivation\(/,
+        'Expected comment creation to avoid per-action comments.openView settings mutation.',
+    );
 });
 
 test('vfs comment creation accepts precomputed optimistic identifiers', () => {

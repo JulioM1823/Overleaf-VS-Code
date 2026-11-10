@@ -208,11 +208,11 @@ export function createDeferredSyncQueueState(
 
 export function parseDeferredSyncQueueState(raw: string): DeferredSyncQueueState {
     const parsed = JSON.parse(raw) as Partial<DeferredSyncQueueState>;
-    return createDeferredSyncQueueState(
-        Array.isArray(parsed.operations)
-            ? parsed.operations.filter(isDeferredSyncOperation)
-            : [],
-    );
+    if (!isRecord(parsed) || parsed.version!==1 || !Array.isArray(parsed.operations)
+        || !parsed.operations.every(isDeferredSyncOperation)) {
+        throw new Error('Invalid offline operation log; preserve it for recovery');
+    }
+    return createDeferredSyncQueueState(parsed.operations);
 }
 
 export function serializeDeferredSyncQueueState(
@@ -220,12 +220,9 @@ export function serializeDeferredSyncQueueState(
 ): string {
     return JSON.stringify({
         lastUpdatedAt: state.lastUpdatedAt,
-        operations: [...state.operations].sort((left, right) => {
-            if (left.createdAt===right.createdAt) {
-                return left.id.localeCompare(right.id);
-            }
-            return left.createdAt.localeCompare(right.createdAt);
-        }),
+        // Array order is causal order. Timestamps and random IDs cannot order
+        // dependent mutations created in the same millisecond.
+        operations: state.operations,
         version: 1,
     }, null, 4);
 }

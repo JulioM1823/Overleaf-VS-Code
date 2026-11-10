@@ -47,25 +47,9 @@ test('document sync journal state sorts keys and preserves conflict metadata', (
     assert.equal(parsed.records['/a.tex'].baseVersion, 3);
 });
 
-test('document sync journal state ignores malformed records and defaults localDirty to false', () => {
-    const parsed = parsePersistedDocumentSyncState(JSON.stringify({
-        records: {
-            '/bad.tex': 42,
-            '/good.tex': {
-                baseSnapshot: textSnapshot('good'),
-                conflict: {
-                    detectedAt: 123,
-                    reason: 'bad-conflict',
-                },
-                localDirty: 'yes',
-            },
-        },
-        version: 99,
-    }));
-
-    assert.deepEqual(Object.keys(parsed.records), ['/good.tex']);
-    assert.equal(parsed.records['/good.tex'].conflict, undefined);
-    assert.equal(parsed.records['/good.tex'].localDirty, false);
+test('document sync journal rejects unknown versions rather than silently clearing recovery metadata', () => {
+    assert.throws(() => parsePersistedDocumentSyncState(JSON.stringify({records: {}, version: 99})), /Invalid/);
+    assert.throws(() => parsePersistedDocumentSyncState('null'), /Invalid/);
 });
 
 test('createBlobId is deterministic for identical content and changes when content changes', () => {
@@ -75,4 +59,12 @@ test('createBlobId is deterministic for identical content and changes when conte
 
     assert.equal(createBlobId(alpha), createBlobId(alphaAgain));
     assert.notEqual(createBlobId(alpha), createBlobId(beta));
+    assert.equal(createBlobId(alpha).length, 64);
+});
+
+test('malformed journal entries cannot be silently discarded or marked clean', () => {
+    for (const record of [null, [], {}, {localDirty: 'true'}, {localDirty: true, baseVersion: -1},
+        {localDirty: true, conflict: {}}, {localDirty: true, baseSnapshot: {kind: 'unknown', hash: 1, size: 0}}]) {
+        assert.throws(() => parsePersistedDocumentSyncState(JSON.stringify({version: 1, records: {'/draft.tex': record}})), /Invalid/);
+    }
 });

@@ -25,8 +25,8 @@ class VSCodeAPIWrapper {
   /**
    * Post a message (i.e. send arbitrary data) to the owner of the webview.
    *
-   * @remarks When running webview code inside a web browser, postMessage will instead
-   * log the given message to the console.
+   * @remarks When running webview code inside a web browser, postMessage will avoid
+   * logging message payloads because they may contain chat content.
    *
    * @param message Abitrary data (must be JSON serializable) to send to the extension context.
    */
@@ -34,7 +34,11 @@ class VSCodeAPIWrapper {
     if (this.vsCodeApi) {
       this.vsCodeApi.postMessage(message);
     } else {
-      console.log(message);
+      const messageType =
+        message && typeof message === "object" && "type" in message
+          ? String((message as { type?: unknown }).type ?? "")
+          : typeof message;
+      console.debug(`webview message suppressed: ${messageType}`);
     }
   }
 

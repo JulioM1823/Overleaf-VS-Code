@@ -1,3 +1,4 @@
+import { emitWithTimeout, sendConfirmedOtUpdate } from './socketAcknowledgement';
 /* eslint-disable @typescript-eslint/naming-convention */
 import {
     BaseAPI,
@@ -9,7 +10,6 @@ import {
 import { OverleafCommentAuthor, OverleafPermissionsLevel } from '../comments/types';
 import { FileEntity, DocumentEntity, FileRefEntity, FileType, FolderEntity, ProjectEntity } from '../core/remoteFileSystemProvider';
 import { logDiagnostic } from '../utils/diagnostics';
-import { EventBus } from '../utils/eventBus';
 import { SocketIOAlt } from './socketioAlt';
 import {
     buildRealtimeHandshakeQuery,
@@ -109,7 +109,9 @@ export class SocketIOAPI {
     private record?: Promise<ProjectEntity>;
     private _handlers: Array<EventsHandler> = [];
     private registeredHandlerObjects = new WeakSet<EventsHandler>();
-    private eventBusDisposables: Array<{dispose(): void}> = [];
+    private connectionClosed = false;
+    private cancellationEpoch = 0;
+    private acceptedPublicId?: string;
     private socketConnectionTarget: SocketConnectionTarget;
     private altProjectUrl?: string;
     private socketSessionId = 0;
@@ -119,6 +121,7 @@ export class SocketIOAPI {
 
     private socket?: any;
     private emit: any;
+    private readonly pendingOtDocuments = new Set<string>();
     private lastConnectingTransport = '';
 
     constructor(private readonly siteUrl:string,
@@ -155,9 +158,20 @@ export class SocketIOAPI {
         return String(error);
     }
 
-    private disposeEventBusDisposables() {
-        this.eventBusDisposables.forEach((disposable) => disposable.dispose());
-        this.eventBusDisposables = [];
+    private onSocketEvent(event: string, listener: (...args: any[]) => void) {
+        const socket = this.socket;
+        const sessionId = this.socketSessionId;
+        socket.on(event, (...args: any[]) => {
+            if (socket!==this.socket || sessionId!==this.socketSessionId
+                || (this.connectionClosed && event!=='disconnect')) { return; }
+            listener(...args);
+        });
+    }
+
+    private notifyConnectionAccepted(publicId: string) {
+        if (typeof publicId!=='string' || publicId===this.acceptedPublicId) { return; }
+        this.acceptedPublicId = publicId;
+        for (const handler of this._handlers) { handler.onConnectionAccepted?.(publicId); }
     }
 
     private get currentTransportName(): string {
@@ -177,11 +191,13 @@ export class SocketIOAPI {
     }
 
     init(connect = true) {
-        this.disposeEventBusDisposables();
         const previousSocket = this.socket;
-        previousSocket?.removeAllListeners?.();
-        previousSocket?.disconnect?.();
+        // Invalidate callbacks before teardown, which can synchronously emit disconnect.
         this.socketSessionId += 1;
+        this.connectionClosed = false;
+        this.acceptedPublicId = undefined;
+        previousSocket?.disconnect?.();
+        previousSocket?.removeAllListeners?.();
         const sessionId = this.socketSessionId;
         let handshakeQuery = '';
         // connect
@@ -221,30 +237,21 @@ export class SocketIOAPI {
             websocketFailureCount: this.websocketFailureCount,
         });
         // create emit
-        (this.socket.emit)[require('util').promisify.custom] = (event:string, ...args:any[]) => {
-            const timeoutPromise = new Promise((_, reject) => {
-                setTimeout(() => {
-                    reject('timeout');
-                }, getSocketEmitTimeoutMs('default'));
-            });
-            const waitPromise = new Promise((resolve, reject) => {
-                this.socket.emit(event, ...args, (err:any, ...data:any[]) => {
-                    if (err) {
-                        reject(err);
-                    } else {
-                        resolve(data);
-                    }
-                });
-            });
-            return Promise.race([waitPromise, timeoutPromise]);
-        };
-        this.emit = require('util').promisify(this.socket.emit).bind(this.socket);
+        const socket = this.socket;
+        this.emit = (event: string, ...args: unknown[]) => emitWithTimeout(socket, event, args, getSocketEmitTimeoutMs('default'));
         // resume handlers
         this.initInternalHandlers();
         this.resumeEventHandlers(this._handlers);
 
         const rootSocket = this.socket?.socket ?? this.socket;
         if (rootSocket) {
+            if (typeof rootSocket.handshake==='function') {
+                const handshake = rootSocket.handshake.bind(rootSocket);
+                rootSocket.handshake = (callback: (...args: any[]) => void) => handshake((...args: any[]) => {
+                    if (sessionId!==this.socketSessionId || socket!==this.socket || this.connectionClosed) { return; }
+                    callback(...args);
+                });
+            }
             rootSocket.options = rootSocket.options || {};
             rootSocket.options.transports = [...this.defaultSocketOptions.transports];
             rootSocket.options['try multiple transports'] = this.defaultSocketOptions['try multiple transports'];
@@ -264,50 +271,49 @@ export class SocketIOAPI {
     }
 
     private emitWithTimeout<T>(event:string, timeoutMs:number, ...args:any[]): Promise<T> {
-        const timeoutPromise = new Promise<T>((_, reject) => {
-            setTimeout(() => {
-                reject('timeout');
-            }, timeoutMs);
-        });
-        const waitPromise = new Promise<T>((resolve, reject) => {
-            this.socket.emit(event, ...args, (err:any, ...data:any[]) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve(data as T);
-                }
-            });
-        });
-        return Promise.race([waitPromise, timeoutPromise]);
+        return emitWithTimeout(this.socket, event, args, timeoutMs) as Promise<T>;
     }
 
     private initInternalHandlers() {
         const schemeAtRegistration = this.scheme;
         const sessionId = this.socketSessionId;
-        this.socket.on('connecting', (transport:string) => {
+        this.onSocketEvent('connecting', (transport:string) => {
             this.lastConnectingTransport = transport;
             this.debugLog('socket.connecting', {scheme: schemeAtRegistration, sessionId, transport});
         });
-        this.socket.on('connect', () => {
+        this.onSocketEvent('connect', () => {
             this.lastConnectingTransport = this.currentTransportName || this.lastConnectingTransport;
             this.debugLog('socket.connected', {scheme: schemeAtRegistration, sessionId});
         });
-        this.socket.on('connect_failed', () => {
+        this.onSocketEvent('connectionAccepted', (_: unknown, publicId: string) => {
+            this.notifyConnectionAccepted(publicId);
+        });
+        this.onSocketEvent('disconnect', (reason?: string) => {
+            const root = this.socket?.socket ?? this.socket;
+            this.debugLog('socket.disconnected', {
+                scheme: schemeAtRegistration, sessionId,
+                reason: reason==='booted' ? 'explicit_or_server_disconnect' : 'transport_closed',
+                transport: this.currentTransportName,
+                heartbeatTimeoutMs: root?.heartbeatTimeout,
+                closeTimeoutMs: root?.closeTimeout,
+            });
+        });
+        this.onSocketEvent('connect_failed', () => {
             this.debugLog('socket.connect_failed', {scheme: schemeAtRegistration, sessionId});
         });
-        this.socket.on('forceDisconnect', (message:string, delay=10) => {
+        this.onSocketEvent('forceDisconnect', (message:string, delay=10) => {
             this.debugLog('socket.force_disconnect', {delay, message, scheme: schemeAtRegistration, sessionId});
         });
-        this.socket.on('connectionRejected', (err:any) => {
+        this.onSocketEvent('connectionRejected', (err:any) => {
             this.debugLog('socket.connection_rejected', {scheme: schemeAtRegistration, sessionId}, err?.message ?? err);
         });
-        this.socket.on('error', (err:any) => {
+        this.onSocketEvent('error', (err:any) => {
             this.debugLog('socket.error', {scheme: schemeAtRegistration, sessionId}, err);
         });
 
         if (this.scheme==='v1' || this.scheme==='v2') {
             this.record = new Promise(resolve => {
-                this.socket.on('joinProjectResponse', (res:any) => {
+                this.onSocketEvent('joinProjectResponse', (res:any) => {
                     const publicId = res.publicId as string;
                     const project = res.project as ProjectEntity;
                     this.websocketFailureCount = 0;
@@ -318,7 +324,7 @@ export class SocketIOAPI {
                         scheme: schemeAtRegistration,
                         sessionId,
                     });
-                    EventBus.fire('socketioConnectedEvent', {publicId});
+                    this.notifyConnectionAccepted(publicId);
                     resolve(project);
                 });
             });
@@ -326,7 +332,9 @@ export class SocketIOAPI {
     }
 
     disconnect() {
-        this.disposeEventBusDisposables();
+        this.connectionClosed = true;
+        this.cancellationEpoch += 1;
+        this.joinAttemptId += 1;
         this.socket.disconnect();
     }
 
@@ -348,19 +356,28 @@ export class SocketIOAPI {
     }
 
     async prepareForJoin() {
+        const epoch = this.cancellationEpoch;
+        const sessionId = this.socketSessionId;
+        const assertCurrent = () => {
+            if (epoch!==this.cancellationEpoch || sessionId!==this.socketSessionId) {
+                throw new Error('Socket initialization cancelled; pending edits are retained');
+            }
+        };
         if (this.scheme!=='Alt') {
             await this.api.updateCookies(this.identity, this.socketConnectionTarget.socketScriptUrl);
+            assertCurrent();
             const handshakeProbe = await this.api.probeRealtimeHandshake(
                 this.identity,
                 this.socketConnectionTarget,
                 buildRealtimeHandshakeQuery(this.projectId),
             );
+            assertCurrent();
             this.identity.cookies = handshakeProbe.cookies;
             this.debugLog('socket.handshake_probe', {
                 scheme: this.scheme,
                 sessionId: this.socketSessionId + 1,
                 status: handshakeProbe.status,
-                setCookieCount: handshakeProbe.setCookieHeaders.length,
+                setCookieCount: handshakeProbe.setCookieCount,
                 transportOptions: handshakeProbe.metadata?.transports ?? [],
                 url: handshakeProbe.url,
             });
@@ -372,6 +389,7 @@ export class SocketIOAPI {
             transports: this.defaultSocketOptions.transports,
             websocketFailureCount: this.websocketFailureCount,
         });
+        assertCurrent();
         this.init(true);
     }
 
@@ -427,7 +445,6 @@ export class SocketIOAPI {
     }
 
     resumeEventHandlers(handlers: Array<EventsHandler>) {
-        this.disposeEventBusDisposables();
         this._handlers = [...handlers];
         this.registeredHandlerObjects = new WeakSet<EventsHandler>();
         handlers.forEach((handler) => {
@@ -452,121 +469,119 @@ export class SocketIOAPI {
         Object.values(handlers).forEach((handler) => {
             switch (handler) {
                 case handlers.onFileCreated:
-                    this.socket.on('reciveNewDoc', (parentFolderId:string, doc:DocumentEntity) => {
+                    this.onSocketEvent('reciveNewDoc', (parentFolderId:string, doc:DocumentEntity) => {
                         handler(parentFolderId, 'doc', doc);
                     });
-                    this.socket.on('reciveNewFile', (parentFolderId:string, file:FileRefEntity) => {
+                    this.onSocketEvent('reciveNewFile', (parentFolderId:string, file:FileRefEntity) => {
                         handler(parentFolderId, 'file', file);
                     });
-                    this.socket.on('reciveNewFolder', (parentFolderId:string, folder:FolderEntity) => {
+                    this.onSocketEvent('reciveNewFolder', (parentFolderId:string, folder:FolderEntity) => {
                         handler(parentFolderId, 'folder', folder);
                     });
                     break;
                 case handlers.onFileRenamed:
-                    this.socket.on('reciveEntityRename', (entityId:string, newName:string) => {
+                    this.onSocketEvent('reciveEntityRename', (entityId:string, newName:string) => {
                         handler(entityId, newName);
                     });
                     break;
                 case handlers.onFileRemoved:
-                    this.socket.on('removeEntity', (entityId:string) => {
+                    this.onSocketEvent('removeEntity', (entityId:string) => {
                         handler(entityId);
                     });
                     break;
                 case handlers.onFileMoved:
-                    this.socket.on('reciveEntityMove', (entityId:string, folderId:string) => {
+                    this.onSocketEvent('reciveEntityMove', (entityId:string, folderId:string) => {
                         handler(entityId, folderId);
                     });
                     break;
                 case handlers.onFileChanged:
-                    this.socket.on('otUpdateApplied', (update: UpdateSchema) => {
-                        handler(update);
+                    this.onSocketEvent('otUpdateApplied', (update: UpdateSchema) => {
+                        // Version-only events confirm our own submissions. The
+                        // submitting path commits its local state after confirmation.
+                        if (update?.op!==undefined) { handler(update); }
                     });
                     break;
                 case handlers.onDisconnected:
-                    this.socket.on('disconnect', () => {
+                    this.onSocketEvent('disconnect', () => {
                         handler();
                     });
                     break;
                 case handlers.onConnectionAccepted:
-                    this.socket.on('connectionAccepted', (_:any, publicId:any) => {
-                        handler(publicId);
-                    });
-                    this.eventBusDisposables.push(EventBus.on('socketioConnectedEvent', (arg:{publicId:string}) => {
-                        handler(arg.publicId);
-                    }));
+                    // Connection acceptance is dispatched once by this socket's
+                    // internal listeners, never through a process-wide event bus.
                     break;
                 case handlers.onClientUpdated:
-                    this.socket.on('clientTracking.clientUpdated', (user:UpdateUserSchema) => {
+                    this.onSocketEvent('clientTracking.clientUpdated', (user:UpdateUserSchema) => {
                         handler(user);
                     });
                     break;
                 case handlers.onClientDisconnected:
-                    this.socket.on('clientTracking.clientDisconnected', (id:string) => {
+                    this.onSocketEvent('clientTracking.clientDisconnected', (id:string) => {
                         handler(id);
                     });
                     break;
                 case handlers.onReceivedMessage:
-                    this.socket.on('new-chat-message', (message:ProjectMessageResponseSchema) => {
+                    this.onSocketEvent('new-chat-message', (message:ProjectMessageResponseSchema) => {
                         handler(message);
                     });
                     break;
                 case handlers.onChatMessageEdited:
-                    this.socket.on('edit-global-message', (message:{messageId:string, userId:string, content:string}) => {
+                    this.onSocketEvent('edit-global-message', (message:{messageId:string, userId:string, content:string}) => {
                         handler(message.messageId, message.userId, message.content);
                     });
                     break;
                 case handlers.onChatMessageDeleted:
-                    this.socket.on('delete-global-message', (message:{messageId:string, userId:string}) => {
+                    this.onSocketEvent('delete-global-message', (message:{messageId:string, userId:string}) => {
                         handler(message.messageId, message.userId);
                     });
                     break;
                 case handlers.onCommentReceived:
-                    this.socket.on('new-comment', (threadId:string, message:ProjectCommentThreadMessageSchema) => {
+                    this.onSocketEvent('new-comment', (threadId:string, message:ProjectCommentThreadMessageSchema) => {
                         handler(threadId, message);
                     });
                     break;
                 case handlers.onCommentMessageEdited:
-                    this.socket.on('edit-message', (threadId:string, messageId:string, content:string) => {
+                    this.onSocketEvent('edit-message', (threadId:string, messageId:string, content:string) => {
                         handler(threadId, messageId, content);
                     });
                     break;
                 case handlers.onCommentMessageDeleted:
-                    this.socket.on('delete-message', (threadId:string, messageId:string) => {
+                    this.onSocketEvent('delete-message', (threadId:string, messageId:string) => {
                         handler(threadId, messageId);
                     });
                     break;
                 case handlers.onCommentThreadResolved:
-                    this.socket.on('resolve-thread', (threadId:string, user:OverleafCommentAuthor) => {
+                    this.onSocketEvent('resolve-thread', (threadId:string, user:OverleafCommentAuthor) => {
                         handler(threadId, user);
                     });
                     break;
                 case handlers.onCommentThreadReopened:
-                    this.socket.on('reopen-thread', (threadId:string) => {
+                    this.onSocketEvent('reopen-thread', (threadId:string) => {
                         handler(threadId);
                     });
                     break;
                 case handlers.onCommentThreadDeleted:
-                    this.socket.on('delete-thread', (threadId:string) => {
+                    this.onSocketEvent('delete-thread', (threadId:string) => {
                         handler(threadId);
                     });
                     break;
                 case handlers.onCommentThreadsCreated:
-                    this.socket.on('new-comment-threads', (threads:ProjectCommentThreadsResponseSchema) => {
+                    this.onSocketEvent('new-comment-threads', (threads:ProjectCommentThreadsResponseSchema) => {
                         handler(threads);
                     });
                     break;
                 case handlers.onSpellCheckLanguageUpdated:
-                    this.socket.on('spellCheckLanguageUpdated', (language:string) => {
+                    this.onSocketEvent('spellCheckLanguageUpdated', (language:string) => {
                         handler(language);
                     });
                     break;
                 case handlers.onCompilerUpdated:
-                    this.socket.on('compilerUpdated', (compiler:string) => {
+                    this.onSocketEvent('compilerUpdated', (compiler:string) => {
                         handler(compiler);
                     });
                     break;
                 case handlers.onRootDocUpdated:
-                    this.socket.on('rootDocUpdated', (rootDocId:string) => {
+                    this.onSocketEvent('rootDocUpdated', (rootDocId:string) => {
                         handler(rootDocId);
                     });
                     break;
@@ -587,6 +602,10 @@ export class SocketIOAPI {
         if (this.socket instanceof SocketIOAlt) {
             return await this.socket.uploadToVFS();
         }
+    }
+
+    async restorePendingAlternativeDocument(docId: string) {
+        if (this.socket instanceof SocketIOAlt) { await this.socket.stageDocument(docId); }
     }
 
     /**
@@ -611,11 +630,6 @@ export class SocketIOAPI {
 
         switch(this.scheme) {
             case 'Alt':
-                const timeoutPromise: Promise<ProjectEntity> = new Promise((_, reject) => {
-                    setTimeout(() => {
-                        reject(new Error(`joinProject timeout after ${getSocketEmitTimeoutMs('joinProject')}ms (scheme=${this.scheme}, projectId=${project_id})`));
-                    }, getSocketEmitTimeoutMs('joinProject'));
-                });
                 const altJoinPromise = this.emitWithTimeout<[ProjectEntity, string, number]>('joinProject', getSocketEmitTimeoutMs('joinProject'), {project_id})
                 .then((returns:[ProjectEntity, string, number]) => {
                     const [project, permissionsLevel, protocolVersion] = returns;
@@ -636,7 +650,7 @@ export class SocketIOAPI {
                     }
                     throw error;
                 });
-                return Promise.race([altJoinPromise, timeoutPromise]);
+                return altJoinPromise;
             case 'v1':
             case 'v2':
                 return this.joinProjectViaHandshakeAutoJoin(project_id, joinAttemptId, joinStrategy);
@@ -652,6 +666,9 @@ export class SocketIOAPI {
         const maxAttempts = 5;
 
         for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex += 1) {
+            if (joinAttemptId!==this.joinAttemptId || this.connectionClosed) {
+                throw new Error('Project join cancelled; pending edits are retained');
+            }
             if (attemptIndex > 0) {
                 const delayMs = Math.min(1000 * attemptIndex, 3000);
                 this.debugLog('join_project.retrying', {
@@ -662,21 +679,28 @@ export class SocketIOAPI {
                     websocketFailureCount: this.websocketFailureCount,
                 });
                 await new Promise((resolve) => setTimeout(resolve, delayMs));
+                if (joinAttemptId!==this.joinAttemptId || this.connectionClosed) {
+                    throw new Error('Project join cancelled; pending edits are retained');
+                }
                 await this.prepareForJoin();
             }
 
+            let timeout: ReturnType<typeof setTimeout> | undefined;
+            let cleanup = () => {};
+            const attemptSocket = this.socket;
             try {
                 const timeoutPromise: Promise<ProjectEntity> = new Promise((_, reject) => {
-                    setTimeout(() => {
+                    timeout = setTimeout(() => {
                         reject(new Error(`joinProject timeout after ${getSocketEmitTimeoutMs('joinProject')}ms (scheme=${this.scheme}, projectId=${projectId})`));
                     }, getSocketEmitTimeoutMs('joinProject'));
                 });
                 const eventJoinPromise = this.record!;
                 const eventRejectPromise: Promise<ProjectEntity> = new Promise((_, reject) => {
-            const cleanup = () => {
-                        this.socket?.removeListener?.('connectionRejected', onConnectionRejected);
-                        this.socket?.removeListener?.('connect_failed', onConnectFailed);
-                        this.socket?.removeListener?.('error', onError);
+                    cleanup = () => {
+                        attemptSocket?.removeListener?.('connectionRejected', onConnectionRejected);
+                        attemptSocket?.removeListener?.('connect_failed', onConnectFailed);
+                        attemptSocket?.removeListener?.('error', onError);
+                        attemptSocket?.removeListener?.('disconnect', onDisconnect);
                     };
                     const rejectWithFailure = (reason: 'connectionRejected' | 'connect_failed' | 'error', message?: string) => {
                         if (reason==='connectionRejected' || reason==='connect_failed') {
@@ -695,6 +719,9 @@ export class SocketIOAPI {
                         cleanup();
                         reject(message ?? reason);
                     };
+                    const onDisconnect = () => {
+                        rejectWithFailure('error', 'Transport disconnected before project join completed');
+                    };
                     const onConnectionRejected = (err:any) => {
                         rejectWithFailure('connectionRejected', err?.message);
                     };
@@ -705,12 +732,16 @@ export class SocketIOAPI {
                         rejectWithFailure('error', this.getSocketErrorMessage(error));
                     };
 
-                    this.socket.on('connectionRejected', onConnectionRejected);
-                    this.socket.on('connect_failed', onConnectFailed);
-                    this.socket.on('error', onError);
-                    eventJoinPromise.finally(cleanup);
+                    attemptSocket.on('connectionRejected', onConnectionRejected);
+                    attemptSocket.on('connect_failed', onConnectFailed);
+                    attemptSocket.on('error', onError);
+                    attemptSocket.on('disconnect', onDisconnect);
                 });
-                return await Promise.race([eventJoinPromise, eventRejectPromise, timeoutPromise]);
+                const project = await Promise.race([eventJoinPromise, eventRejectPromise, timeoutPromise]);
+                if (attemptSocket!==this.socket || !this.isConnected || joinAttemptId!==this.joinAttemptId) {
+                    throw new Error('Project join completed on a stale or closed transport');
+                }
+                return project;
             } catch (error) {
                 lastError = error;
                 this.noteTransportFailure();
@@ -720,6 +751,9 @@ export class SocketIOAPI {
                     transport: this.currentTransportName,
                     websocketFailureCount: this.websocketFailureCount,
                 }, error);
+            } finally {
+                clearTimeout(timeout);
+                cleanup();
             }
         }
 
@@ -735,7 +769,13 @@ export class SocketIOAPI {
         return this.emit('joinDoc', docId, { encodeRanges: true })
             .then((returns: [Array<string>, number, Array<any>, any]) => {
                 const [docLinesAscii, version, updates, ranges] = returns;
-                const docLines = docLinesAscii.map((line) => decodePackedUtf8(line));
+                if (!Array.isArray(docLinesAscii) || !docLinesAscii.every(line => typeof line==='string')
+                    || !Number.isSafeInteger(version) || version < 0) {
+                    throw new Error('Invalid document snapshot');
+                }
+                const docLines = this.socket instanceof SocketIOAlt
+                    ? docLinesAscii
+                    : docLinesAscii.map((line) => decodePackedUtf8(line));
                 return {docLines, version, updates, ranges};
             });
     }
@@ -759,10 +799,21 @@ export class SocketIOAPI {
      * @returns {Promise}
      */
     async applyOtUpdate(docId:string, update:UpdateSchema) {
-        return this.emit('applyOtUpdate', docId, update)
-            .then(() => {
-                return;
-            });
+        if (this.pendingOtDocuments.has(docId)) {
+            throw new Error('A document update is already in flight; recovery required');
+        }
+        this.pendingOtDocuments.add(docId);
+        try {
+            if (this.socket instanceof SocketIOAlt) {
+                if (update.op?.some(op => op.c!==undefined)) {
+                    throw new Error('Comment anchors require a realtime connection; the comment remains queued for recovery');
+                }
+                // Alternative mode buffers changes for an explicit upload.
+                await this.emit('applyOtUpdate', docId, update);
+            } else {
+                await sendConfirmedOtUpdate(this.socket, docId, update, getSocketEmitTimeoutMs('default'));
+            }
+        } finally { this.pendingOtDocuments.delete(docId); }
     }
 
     /**

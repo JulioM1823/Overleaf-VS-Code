@@ -29,3 +29,15 @@ export function isLikelyPdfPayload(content: Uint8Array) {
     const headerText = new TextDecoder().decode(headerWindow);
     return headerText.includes('%PDF-');
 }
+
+export function getPdfReadFailureMessage(error: unknown): string {
+    const message = error instanceof Error ? error.message : '';
+    const status = /Download failed \(HTTP (\d{3})\)/.exec(message)?.[1];
+    if (status) {
+        return `Unable to download the compiled PDF (HTTP ${status}). Compile again; if the error persists, check the Overleaf session and compilation diagnostics.`;
+    }
+    if (message==='Downloaded content is not a PDF.') {
+        return 'The generated file is empty or is not a PDF. Check the compilation diagnostics and compile again.';
+    }
+    return 'Unable to read the compiled PDF. Check the compilation diagnostics and the Overleaf connection, then compile again.';
+}

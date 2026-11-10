@@ -1,7 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { BaseAPI, extractAuthenticatedUserContext } = require('../out/api/base.js');
+const {
+    BaseAPI,
+    extractAuthenticatedUserContext,
+    normalizeBaseApiUrl,
+    normalizeCompileResponsePayload,
+} = require('../out/api/base.js');
 const { MockOverleafHttpServer } = require('./support/mockOverleafHttpServer.cjs');
 
 test('extractAuthenticatedUserContext prefers ol-user JSON meta', () => {
@@ -34,6 +39,58 @@ test('extractAuthenticatedUserContext falls back to legacy user id meta', () => 
 test('extractAuthenticatedUserContext returns undefined without user id or csrf token', () => {
     const body = `<meta name="ol-user" content="{&quot;email&quot;:&quot;missing@example.com&quot;}">`;
     assert.equal(extractAuthenticatedUserContext(body), undefined);
+});
+
+test('normalizeBaseApiUrl requires HTTPS except for loopback development servers', () => {
+    assert.equal(normalizeBaseApiUrl('https://example.com/sharelatex?token=secret#hash'), 'https://example.com/sharelatex/');
+    assert.equal(normalizeBaseApiUrl('http://localhost:8080'), 'http://localhost:8080/');
+    assert.equal(normalizeBaseApiUrl('http://127.0.0.1:8080'), 'http://127.0.0.1:8080/');
+    assert.equal(normalizeBaseApiUrl('http://[::1]:8080'), 'http://[::1]:8080/');
+
+    assert.throws(
+        () => new BaseAPI('http://example.com'),
+        /must use HTTPS unless it targets localhost/,
+    );
+    assert.throws(
+        () => normalizeBaseApiUrl('ftp://example.com'),
+        /must use http or https/,
+    );
+});
+
+test('authenticated URLs reject embedded Basic Authentication credentials', async () => {
+    assert.throws(()=>normalizeBaseApiUrl('https://username:password@example.com'),/embedded credentials/);
+    const api=new BaseAPI('https://example.com').setIdentity({cookies:'sid=fake',csrfToken:'fake'});
+    await assert.rejects(api.download('https://user:secret@example.com/project'),/credentials/);
+});
+
+test('downloads follow same-origin redirects and reject credential-bearing destinations', async t => {
+    const server=await new MockOverleafHttpServer().start();t.after(()=>server.stop());
+    server.addRoute('GET','/redirect',()=>({status:302,headers:{location:'/pdf'},body:'redirect'}));
+    server.addRoute('GET','/pdf',({headers})=>{
+        assert.equal(headers.cookie,'sid=fake'); return {status:200,body:Buffer.from('PDF contents')};
+    });
+    server.addRoute('GET','/unsafe',()=>({status:302,headers:{location:'https://user:secret@example.com/private'},body:'redirect'}));
+    const api=new BaseAPI(server.baseUrl).setIdentity({cookies:'sid=fake',csrfToken:'fake'});
+    assert.equal((await api.downloadWithRedirects('redirect')).toString(),'PDF contents');
+    await assert.rejects(api.downloadWithRedirects('unsafe'),/insecure|unsupported/);
+});
+
+test('normalizeCompileResponsePayload preserves failed compile metadata', () => {
+    const response = normalizeCompileResponsePayload({
+        buildId: 'build-123',
+        clsiServerId: 'clsi-a',
+        errors: [{message: 'TeX failed'}],
+        outputFiles: [{path: 'output.log', type: 'log'}],
+        status: 'failure',
+        validationProblems: [{message: 'root document issue'}],
+    });
+
+    assert.equal(response.status, 'failure');
+    assert.equal(response.buildId, 'build-123');
+    assert.equal(response.clsiServerId, 'clsi-a');
+    assert.deepEqual(response.outputFiles, [{path: 'output.log', type: 'log'}]);
+    assert.deepEqual(response.errors, [{message: 'TeX failed'}]);
+    assert.deepEqual(response.validationProblems, [{message: 'root document issue'}]);
 });
 
 test('passportLogin succeeds when captcha preflight allows password login', async () => {
@@ -248,4 +305,21 @@ test('getMessages uses same-origin headers for global chat history fetches', asy
     } finally {
         await server.stop();
     }
+});
+
+test('downloads advance HTTP byte ranges and never duplicate a repeated partial response', async () => {
+    const server = await new MockOverleafHttpServer().start();
+    let calls = 0;
+    server.addRoute('GET', '/partial', () => (++calls === 1
+        ? {status: 206, headers: {'content-range': 'bytes 0-2/6'}, body: Buffer.from('abc')}
+        : {status: 206, headers: {'content-range': 'bytes 3-5/6'}, body: Buffer.from('def')}));
+    server.addRoute('GET', '/stuck', () => ({status: 206, headers: {'content-range': 'bytes 0-2/6'}, body: Buffer.from('abc')}));
+    server.addRoute('GET', '/missing', () => ({status: 404, body: 'not a document'}));
+    try {
+        const api = new BaseAPI(server.baseUrl).setIdentity({cookies: 'session=test', csrfToken: 'test'});
+        assert.equal((await api.download('partial')).toString(), 'abcdef');
+        assert.equal(calls, 2);
+        await assert.rejects(api.download('stuck'), /range/);
+        await assert.rejects(api.download('missing'), /404/);
+    } finally { await server.stop(); }
 });

@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
-import * as os from 'os';
 import * as path from 'path';
+import { createPrivateTemporaryFile } from '../utils/privateTemporaryFile';
 import { RemoteFileSystemProvider, VirtualFileSystem, parseUri } from '../core/remoteFileSystemProvider';
 import type { ProjectSessionCoordinator } from '../core/documentSessionManager';
 import { ROOT_NAME, OUTPUT_FOLDER_NAME } from '../consts';
@@ -11,6 +11,7 @@ import { logDiagnostic, registerDiagnosticStateProvider, startDiagnosticSpan } f
 import { LocalReplicaSCMProvider } from '../scm/localReplicaSCM';
 import { resolveCompileRenderStatus, CompileRenderStatus, CompileTerminalStatus } from './compileStatus';
 import {
+    isCompileLogArtifact,
     normalizeCompileArtifactPath,
     normalizeSyncResultFilePath,
 } from './compileArtifacts';
@@ -414,8 +415,11 @@ export class CompileManager {
         return localReplicaSettings?.uri !== undefined;
     }
 
-    private shouldSaveAllBeforeCompile(source: CompileInvocationSource, targetUri?: vscode.Uri) {
-        return !(source==='save' && targetUri?.scheme===ROOT_NAME);
+    private shouldSaveAllBeforeCompile(targetUri?: vscode.Uri) {
+        // Remote editor buffers are flushed by prepareForRemoteCompile. Saving
+        // the whole workspace also writes unrelated settings/binary files and
+        // other projects, which is neither needed nor safe for this compile.
+        return targetUri?.scheme!==ROOT_NAME;
     }
 
     private async tryOfflineLocalReplicaCompileFallback(targetUri?: vscode.Uri) {
@@ -632,6 +636,10 @@ export class CompileManager {
         }
     }
 
+    private hasCompileLogOutput(vfs: VirtualFileSystem | undefined) {
+        return vfs?.getCompileOutputs?.()?.some(isCompileLogArtifact) === true;
+    }
+
     async update(status?: 'success'|'compiling'|'failed'|'alert') {
         const renderRevision = ++this.statusRenderRevision;
         this.rememberCompileStatus(status);
@@ -753,11 +761,11 @@ export class CompileManager {
             }
             return;
         }
-        if (this.shouldSaveAllBeforeCompile(source, requestedTargetUri)) {
-            await vscode.workspace.saveAll(); // save all dirty files for command/local-disk compile paths.
+        if (this.shouldSaveAllBeforeCompile(requestedTargetUri)) {
+            await vscode.workspace.saveAll(); // Local builds require saved files on disk.
         } else {
             this.logDiagnostic('compile.save_all_skipped', {
-                reason: 'current_window_save',
+                reason: 'remote_document_sync_preflight',
                 targetUri: requestedTargetUri?.toString() ?? '',
             });
         }
@@ -884,12 +892,13 @@ export class CompileManager {
                     : undefined;
                 compileResult = await vfs.compile(force, this.compileAsDraft, this.compileStopOnFirstError, rootDocId);
                 assertCompileStillActive();
-                if (compileResult===true) {
+                const hasCompileLog = this.hasCompileLogOutput(vfs);
+                if (compileResult===true || (compileResult===false && hasCompileLog)) {
                     const hasError = await this.checkCompileDiagnostics(uri);
                     assertCompileStillActive();
-                    return {compileResult, hasError};
+                    return {compileResult, hasCompileLog, hasError};
                 }
-                return {compileResult, hasError: undefined};
+                return {compileResult, hasCompileLog, hasError: undefined};
             })(), () => {
                 compileTimedOut = true;
             });
@@ -908,9 +917,15 @@ export class CompileManager {
                     return;
                 case false:
                     await this.update('failed');
+                    if (!pipelineResult.hasCompileLog && source==='command') {
+                        vscode.window.showErrorMessage(vscode.l10n.t('Overleaf compilation failed without returning output.log. Open the Overleaf-VS Code diagnostics output for compile response details.'));
+                    }
                     this.logDiagnostic('compile.command.completed', {
                         compileResult: 'failed',
+                        diagnosticsChecked: pipelineResult.hasCompileLog,
                         force,
+                        hasError: pipelineResult.hasError===true,
+                        hasOutputLog: pipelineResult.hasCompileLog,
                         uri: uri.toString(),
                     });
                     compileSpan.end({
@@ -1057,10 +1072,7 @@ export class CompileManager {
                 uri: pdfUri.toString(),
             });
             const content = await vfs.openFile(pdfUri);
-            const tempDir = vscode.Uri.file(path.join(os.tmpdir(), ROOT_NAME, 'compiled-pdf', identifier.replace(/[^\w.-]+/g, '_')));
-            const tempFile = vscode.Uri.file(path.join(tempDir.fsPath, path.basename(pdfPath)));
-            await vscode.workspace.fs.createDirectory(tempDir);
-            await vscode.workspace.fs.writeFile(tempFile, content);
+            const tempFile = vscode.Uri.file(await createPrivateTemporaryFile(path.basename(pdfPath), content));
             const opened = await vscode.env.openExternal(tempFile);
             if (!opened) {
                 this.logDiagnostic('pdf.external_open_rejected', {

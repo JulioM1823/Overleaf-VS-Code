@@ -1,11 +1,12 @@
 # Governance and Release Operations
 
-This document records the repository-owned governance and release process for Overleaf Workshop. It captures the feasible maintenance cleanup from the open governance issues without changing the published extension identifier.
+This document records the repository-owned governance and release process for Overleaf-VS Code, independently maintained and published by AstroJulio.
 
 ## Ownership and Scope
 
-- The source repository is maintained under the `overleaf-workshop/Overleaf-Workshop` GitHub organization.
-- The published VS Code Marketplace identifier currently remains `iamhyc.overleaf-workshop`.
+- The source repository is [JulioM1823/Overleaf-VS-Code](https://github.com/JulioM1823/Overleaf-VS-Code).
+- The published VS Code Marketplace identifier is `AstroJulio.orbitleaf`; the display name is **Overleaf-VS Code**.
+- The extension is built on [Overleaf Workshop](https://github.com/overleaf-workshop/Overleaf-Workshop), developed by iamhyc and the Overleaf Workshop contributors. Upstream attribution and historical references are retained.
 - Do not change the `publisher` field or extension identifier as part of routine maintenance. A publisher migration needs a dedicated plan because it can break upgrade continuity, existing Marketplace links, and badge references.
 
 ## Maintainer Responsibilities
@@ -18,10 +19,9 @@ This document records the repository-owned governance and release process for Ov
 
 ## Release Automation
 
-- [`vsce-package.yml`](../.github/workflows/vsce-package.yml) builds a temporary `.vsix` artifact for pull requests targeting `master`.
-- [`vsce-publish.yml`](../.github/workflows/vsce-publish.yml) runs on manual dispatch and on a daily schedule.
-- The publish workflow only proceeds when `package.json` changed within the previous 24 hours.
-- Publishing requires the repository secrets `VSCE_PAT` and `OVSX_TOKEN`.
+- [`vsce-package.yml`](../.github/workflows/vsce-package.yml) builds a temporary `.vsix` artifact for pull requests targeting `main` and on manual dispatch.
+- [`vsce-publish.yml`](../.github/workflows/vsce-publish.yml) runs on manual dispatch, tests and packages the extension, and publishes that exact package to the Visual Studio Marketplace.
+- Publishing through the workflow requires the repository secret `VSCE_PAT`.
 - Before bumping `package.json`, verify the extension builds cleanly and the relevant tests for the release scope have passed.
 
 ## Roadmap Management
@@ -35,10 +35,10 @@ This document records the repository-owned governance and release process for Ov
 
 ## Release Checklist
 
-1. Confirm the intended release changes are merged to `master`.
+1. Confirm the intended release changes are merged to `main`.
 2. Update the version in `package.json` in a dedicated change.
 3. Verify `npm run compile`, `npm run lint`, and the issue-specific regression tests for the release scope.
-4. Run `npm run validate:release` to verify the release metadata, workflow files, and roadmap docs remain coherent.
-5. Confirm `VSCE_PAT` and `OVSX_TOKEN` are configured in repository secrets.
-6. Run or monitor the publish workflow and verify both VS Code Marketplace and Open VSX publication succeed.
+4. Run `npm run package:source` and `npm run validate:release` to verify release metadata and the exact corresponding-source archive.
+5. Confirm `VSCE_PAT` is configured in repository secrets when using the publish workflow.
+6. Run or monitor the publish workflow, or upload the tested VSIX through the publisher dashboard, and verify Visual Studio Marketplace publication succeeds.
 7. Update user-facing documentation when release behavior or constraints changed.

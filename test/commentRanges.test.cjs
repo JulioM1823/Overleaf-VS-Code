@@ -65,6 +65,7 @@ test('applyTextOperationsToCommentRanges shifts comments on insert and delete', 
         { d: 'bro', p: 15 },
     ]);
     assert.equal(result.contentMismatchCount, 0);
+    assert.deepEqual(result.removedThreadIds, []);
     assert.deepEqual(result.ranges, [
         { id: 'thread-1', metadata: undefined, op: { c: 'wn', p: 15, resolved: undefined, t: 'thread-1' }, resolved: undefined },
     ]);
@@ -77,7 +78,35 @@ test('applyTextOperationsToCommentRanges reports delete mismatches without dropp
         { d: 'xxx', p: 10 },
     ]);
     assert.equal(result.contentMismatchCount, 1);
+    assert.deepEqual(result.removedThreadIds, []);
     assert.deepEqual(result.ranges[0].op.c, 'wn');
+});
+
+test('applyTextOperationsToCommentRanges removes ranges whose anchored text is fully deleted', () => {
+    const result = applyTextOperationsToCommentRanges([
+        { id: 'thread-1', op: { c: 'brown', p: 10, t: 'thread-1' } },
+        { id: 'thread-2', op: { c: 'fox', p: 20, t: 'thread-2' } },
+    ], [
+        { d: 'brown', p: 10 },
+    ]);
+    assert.equal(result.contentMismatchCount, 0);
+    assert.deepEqual(result.removedThreadIds, ['thread-1']);
+    assert.deepEqual(result.ranges, [
+        { id: 'thread-2', metadata: undefined, op: { c: 'fox', p: 15, resolved: undefined, t: 'thread-2' }, resolved: undefined },
+    ]);
+});
+
+test('applyTextOperationsToCommentRanges keeps empty anchors during unrelated deletes', () => {
+    const result = applyTextOperationsToCommentRanges([
+        { id: 'thread-1', op: { c: '', p: 10, t: 'thread-1' } },
+    ], [
+        { d: 'abc', p: 3 },
+    ]);
+    assert.equal(result.contentMismatchCount, 0);
+    assert.deepEqual(result.removedThreadIds, []);
+    assert.deepEqual(result.ranges, [
+        { id: 'thread-1', metadata: undefined, op: { c: '', p: 7, resolved: undefined, t: 'thread-1' }, resolved: undefined },
+    ]);
 });
 
 test('updateCommentRangeResolvedState and removeCommentRange target thread ids', () => {

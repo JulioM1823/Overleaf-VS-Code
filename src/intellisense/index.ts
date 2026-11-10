@@ -3,6 +3,7 @@ import { ROOT_NAME } from '../consts';
 import { RemoteFileSystemProvider } from '../core/remoteFileSystemProvider';
 
 export function fuzzyFilter<T extends object>(list: T[], target: string, keys?: (keyof T)[]) {
+    if (list.length===0) { return []; }
     const fuzzysearch = require('fuzzysearch');
     // if list is string[]
     if (typeof list[0] === 'string') {

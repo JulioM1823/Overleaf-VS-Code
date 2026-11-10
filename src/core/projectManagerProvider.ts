@@ -1,10 +1,11 @@
+import { assertSafeLocalPath } from '../utils/safeFile';
 import * as vscode from 'vscode';
 import * as fs from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
 import stripJsonComments = require('strip-json-comments');
 import { ROOT_NAME } from '../consts';
-import { ProjectPersist, ProjectTagsResponseSchema, ResponseSchema } from '../api/base';
+import { normalizeBaseApiUrl, ProjectPersist, ProjectTagsResponseSchema, ResponseSchema } from '../api/base';
 import { GlobalStateManager } from '../utils/globalStateManager';
 import { logDiagnostic } from '../utils/diagnostics';
 import {
@@ -22,6 +23,7 @@ import {
 import {
     ensureLocalReplicaCompileWorkspaceDefaults,
     sanitizeLocalReplicaProjectFolderName,
+    splitSafeProjectPath,
     writeLocalReplicaSettingsToWorkspaceRoot,
 } from '../scm/localReplicaWorkspace';
 import {
@@ -375,8 +377,15 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
                 if (normalizedPath==='') {
                     continue;
                 }
-                const parts = normalizedPath.split('/').filter(Boolean);
-                if (parts.length===0) {
+                const parts = splitSafeProjectPath(normalizedPath);
+                if (!parts?.length) { throw new Error('Unsafe project archive path'); }
+                const target = vscode.Uri.joinPath(baseUri, ...parts);
+                await assertSafeLocalPath(baseUri, target);
+                // An archive seeds missing files only. A watcher or editor can
+                // create a file after the initial directory scan.
+                if (target.scheme==='file') {
+                    await fs.mkdir(path.dirname(target.fsPath), {recursive: true});
+                    await fs.writeFile(target.fsPath, content, {flag: 'wx'});
                     continue;
                 }
                 const parentParts = parts.slice(0, -1);
@@ -490,6 +499,8 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
 
     private async promptCookieLogin(server: ServerItem, action: string, fields: Record<string, unknown> = {}, prompt?: string) {
         const cookies = await vscode.window.showInputBox({
+            ignoreFocusOut: true,
+            password: true,
             placeHolder: vscode.l10n.t('Cookies, e.g., "sharelatex.sid=..." or "overleaf_session2=..."'),
             prompt: prompt ?? vscode.l10n.t('README: [How to Login with Cookies](https://github.com/overleaf-workshop/overleaf-workshop#how-to-login-with-cookies)'),
         });
@@ -792,12 +803,9 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
         .then((url) => {
             if (url) {
                 try {
-                    // check if url is valid
-                    const _url = new URL(url);
-                    if (!(_url.protocol==='http:' || _url.protocol==='https:')) {
-                        throw new Error( vscode.l10n.t('Invalid protocol.') );
-                    }
-                    if (GlobalStateManager.addServer(this.context, _url.host, _url.href)) {
+                    const normalizedUrl = normalizeBaseApiUrl(url);
+                    const _url = new URL(normalizedUrl);
+                    if (GlobalStateManager.addServer(this.context, _url.host, normalizedUrl)) {
                         this.refresh('server_added');
                     }
                 } catch (e) {
@@ -818,71 +826,56 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
         });
     }
 
-    loginServer(server: ServerItem) {
-        const loginMethods:Record<string, ()=>void> = {
-            // eslint-disable-next-line @typescript-eslint/naming-convention
-            'Login with Password': () => {
-                vscode.window.showInputBox({'placeHolder': vscode.l10n.t('Email')})
-                .then(email => email ? Promise.resolve(email) : Promise.reject())
-                .then(email =>
-                    vscode.window.showInputBox({'placeHolder': vscode.l10n.t('Password'), 'password': true})
-                    .then(password => {
-                        return password ? Promise.resolve([email,password]) : Promise.reject();
-                    })
-                )
-                .then(([email,password]) => this.withActionProgress(
-                    'server_login_password',
-                    {title: vscode.l10n.t('Signing in to {serverName}', {serverName: server.name})},
-                    {serverName: server.name},
-                    async () => {
-                        const success = await GlobalStateManager.loginServer(this.context, server.api, server.name, {email, password});
-                        if (!success) {
-                            throw new Error(vscode.l10n.t('Login failed.'));
-                        }
-                        this.refresh('server_logged_in_password');
-                    }
-                ), (error: unknown) => {
-                    if (error) {
-                        vscode.window.showErrorMessage(error instanceof Error ? error.message : vscode.l10n.t('Login failed.'));
-                    }
+    async loginServer(server?: ServerItem) {
+        try {
+            // Commands invoked from the palette do not receive a tree item.
+            // Resolve a host before displaying any authentication prompts.
+            if (!server?.name || !server.api) {
+                const hosts = GlobalStateManager.getServers(this.context).map(({server: persisted, api}) => ({
+                    label: persisted.name,
+                    description: persisted.url,
+                    host: new ServerItem(api, persisted.name, persisted.login?.username ?? '', vscode.TreeItemCollapsibleState.None),
+                }));
+                const selected = hosts.length===1 ? hosts[0] : await vscode.window.showQuickPick(hosts, {
+                    placeHolder: vscode.l10n.t('Select the Overleaf server to sign in to.'),
                 });
-            },
-            // eslint-disable-next-line @typescript-eslint/naming-convention
-            'Login in Browser (Then Paste Cookies)': () => {
-                this.beginBrowserAssistedLogin(server)
-                .catch((error: unknown) => {
-                    if (error) {
-                        vscode.window.showErrorMessage(error instanceof Error ? error.message : vscode.l10n.t('Login failed.'));
-                    }
-                });
-            },
-            // eslint-disable-next-line @typescript-eslint/naming-convention
-            'Login with Cookies': () => {
-                this.promptCookieLogin(server, 'server_login_cookies')
-                .catch((error: unknown) => {
-                    if (error) {
-                        vscode.window.showErrorMessage(error instanceof Error ? error.message : vscode.l10n.t('Login failed.'));
-                    }
-                });
-            },
-            // eslint-disable-next-line @typescript-eslint/naming-convention
-            'Open Login Guide': () => {
-                this.openLoginGuide(server.name);
-            },
-        };
-
-        vscode.window.showQuickPick(Object.keys(loginMethods), {
-            canPickMany:false, placeHolder:vscode.l10n.t('Select the login method below.')})
-        .then(selection => {
-            if (selection===undefined) {
-                this.logActionCancelled('server_login_pick', {
-                    serverName: server.name,
-                });
-                return Promise.reject();
+                if (!selected) { return; }
+                server = selected.host;
             }
-            return Promise.resolve( (loginMethods as any)[selection] );
-        })
-        .then(method => method(), () => undefined);
+            const selection = await vscode.window.showQuickPick([
+                'Login with Cookies', 'Login in Browser (Then Paste Cookies)', 'Login with Password', 'Open Login Guide',
+            ], {canPickMany:false, placeHolder:vscode.l10n.t('Select the login method below.')});
+            switch (selection) {
+                case 'Login with Cookies':
+                    await this.promptCookieLogin(server, 'server_login_cookies');
+                    break;
+                case 'Login in Browser (Then Paste Cookies)':
+                    await this.beginBrowserAssistedLogin(server);
+                    break;
+                case 'Login with Password': {
+                    const email = await vscode.window.showInputBox({placeHolder: vscode.l10n.t('Email'), ignoreFocusOut: true});
+                    if (!email) { return; }
+                    const password = await vscode.window.showInputBox({placeHolder: vscode.l10n.t('Password'), password: true, ignoreFocusOut: true});
+                    if (!password) { return; }
+                    await this.withActionProgress('server_login_password',
+                        {title: vscode.l10n.t('Signing in to {serverName}', {serverName: server.name})},
+                        {serverName: server.name}, async () => {
+                            if (!await GlobalStateManager.loginServer(this.context, server!.api, server!.name, {email, password})) {
+                                throw new Error(vscode.l10n.t('Login failed.'));
+                            }
+                            this.refresh('server_logged_in_password');
+                        });
+                    break;
+                }
+                case 'Open Login Guide':
+                    await this.openLoginGuide(server.name);
+                    break;
+                default:
+                    this.logActionCancelled('server_login_pick', {serverName: server.name});
+            }
+        } catch (error) {
+            await vscode.window.showErrorMessage(error instanceof Error ? error.message : vscode.l10n.t('Login failed.'));
+        }
     }
 
     openLoginGuide(serverName?: string) {
@@ -1647,9 +1640,7 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
             vscode.commands.registerCommand(`${ROOT_NAME}.projectManager.removeServer`, (item) => {
                 this.removeServer(item.name);
             }),
-            vscode.commands.registerCommand(`${ROOT_NAME}.projectManager.loginServer`, (item) => {
-                this.loginServer(item);
-            }),
+            vscode.commands.registerCommand(`${ROOT_NAME}.projectManager.loginServer`, (item) => this.loginServer(item)),
             vscode.commands.registerCommand(`${ROOT_NAME}.projectManager.openLoginGuide`, (item) => {
                 this.openLoginGuide(item?.name);
             }),

@@ -21,7 +21,7 @@
 ## For Developers
 - [Diagnostics and Debugging](diagnostics.md)
 - [Overleaf Server Public API](webapi.md)
-- [Overleaf Workshop Extension Anatomy](anatomy.md)
+- [Overleaf-VS Code Extension Anatomy](anatomy.md)
 - [Testing Harnesses](testing-harnesses.md)
 - [Governance and Release Operations](governance.md)
 - [Compatibility Notes](compatibility.md)

@@ -124,16 +124,27 @@ const exactSensitiveDiagnosticKeys = new Set([
     'cookies',
     'csrfToken',
     'email',
+    'errorMessage',
+    'errorStack',
+    'fileName',
+    'folderName',
     'fileUri',
     'identifier',
     'identity',
+    'label',
     'lineText',
     'localText',
+    'message',
+    'newLabel',
+    'newName',
     'nextRemoteText',
+    'oldLabel',
+    'oldName',
     'origin',
     'password',
     'previousRemoteText',
     'projectId',
+    'projectLabel',
     'projectName',
     'publicId',
     'raw',
@@ -144,6 +155,8 @@ const exactSensitiveDiagnosticKeys = new Set([
     'serverName',
     'snapshotUri',
     'storageRoot',
+    'tagLabel',
+    'tagName',
     'target',
     'uri',
     'url',
@@ -157,14 +170,23 @@ const normalizedSensitiveDiagnosticKeys = new Set(
 );
 
 const sensitiveDiagnosticKeyPattern = /(?:authorization|cookie|credential|csrf|identity|password|secret|sessionid|token)/i;
+const identifyingDiagnosticKeyPattern = /(?:doc(?:ument)?|entity|file|folder|message|operation|thread|user|project|public|client)ids?$/i;
 const emailPattern = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const cookieValuePattern = /\b([A-Za-z0-9_.-]*(?:sid|session|cookie)[A-Za-z0-9_.-]*=)[^;\s]+/gi;
 const sensitiveQueryPattern = /([?&](?:_?csrf|access_token|auth|code|cookie|password|session|token)=)[^&#\s]+/gi;
 const absolutePathPattern = /(?:\/Users\/[^/\s"'<>]+(?:\/[^\s"'<>]*)?|[A-Za-z]:\\[^\s"'<>]*)/g;
 const diagnosticStringMaxLength = 2048;
+const diagnosticDigestKey = crypto.randomBytes(32);
+
+type NormalizationContext = {ancestors: Set<object>, depth: number, remaining: number};
+function normalizationContext(): NormalizationContext {
+    return {ancestors: new Set(), depth: 0, remaining: 1000};
+}
 
 function digestDiagnosticValue(value: string): string {
-    return crypto.createHash('sha256').update(value).digest('hex').slice(0, 12);
+    // Correlate redacted values within this process without exposing a public
+    // dictionary hash of passwords, names or unpublished document text.
+    return crypto.createHmac('sha256', diagnosticDigestKey).update(value).digest('hex').slice(0, 12);
 }
 
 function redactedDiagnosticValue(value: string, label = 'value'): string {
@@ -184,7 +206,8 @@ function isSensitiveDiagnosticKey(key?: string): boolean {
     }
     const normalizedKey = normalizeDiagnosticKey(key) ?? '';
     return normalizedSensitiveDiagnosticKeys.has(normalizedKey)
-        || sensitiveDiagnosticKeyPattern.test(key);
+        || sensitiveDiagnosticKeyPattern.test(key)
+        || identifyingDiagnosticKeyPattern.test(key);
 }
 
 function isPathLikeDiagnosticKey(key?: string): boolean {
@@ -199,7 +222,8 @@ function sanitizeUrlLikeDiagnosticValue(value: string): string {
     if (trimmed.startsWith('/') || trimmed.includes('\\')) {
         return redactedDiagnosticValue(trimmed, 'path');
     }
-    return value.replace(sensitiveQueryPattern, (_match, prefix) => `${prefix}[redacted]`);
+    // Relative API routes also carry project IDs, filenames and query values.
+    return redactedDiagnosticValue(value, 'path');
 }
 
 function sanitizeDiagnosticString(value: string, key?: string): string {
@@ -239,13 +263,23 @@ function normalizePrimitive(value: unknown): Primitive | undefined {
     }
 }
 
-function normalizeObject(value: Record<string, unknown>): {[key: string]: DiagnosticValue} {
-    const normalizedEntries = Object.entries(value)
-        .map(([key, item]) => [key, normalizeValue(item, key)] as const)
-        .filter((entry): entry is readonly [string, DiagnosticValue] => entry[1] !== undefined)
-        .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey));
-
-    return Object.fromEntries(normalizedEntries);
+function normalizeObject(value: Record<string, unknown>, context = normalizationContext()): {[key: string]: DiagnosticValue} {
+    const entries: Array<[string, DiagnosticValue]> = [];
+    context.ancestors.add(value);
+    context.depth++;
+    try {
+        for (const key of Object.keys(value).slice(0, 100)) {
+            if (context.remaining <= 0) { break; }
+            let item: DiagnosticValue | undefined;
+            try { item = normalizeValue(value[key], key, context); }
+            catch { item = '[unavailable]'; }
+            if (item !== undefined) { entries.push([key, item]); }
+        }
+        return Object.fromEntries(entries.sort(([left], [right]) => left.localeCompare(right)));
+    } finally {
+        context.depth--;
+        context.ancestors.delete(value);
+    }
 }
 
 function normalizeError(error: unknown, includeStack: boolean): {[key: string]: DiagnosticValue} | undefined {
@@ -269,17 +303,30 @@ function normalizeError(error: unknown, includeStack: boolean): {[key: string]: 
     }
 
     if (typeof error === 'string') {
-        return {errorMessage: error};
+        return {errorMessage: sanitizeDiagnosticString(error, 'errorMessage')};
     }
 
     if (typeof error === 'object' && error !== null) {
-        return normalizeObject(error as Record<string, unknown>);
+        // Arbitrary thrown objects may contain reflected document text under
+        // unknown keys. Do not treat them as trusted diagnostic fields.
+        return {errorMessage: '[redacted-error]'};
     }
 
-    return {errorMessage: String(error)};
+    return {errorMessage: sanitizeDiagnosticString(String(error), 'errorMessage')};
 }
 
-function normalizeValue(value: unknown, key?: string): DiagnosticValue | undefined {
+function normalizeValue(value: unknown, key?: string, context = normalizationContext()): DiagnosticValue | undefined {
+    if (context.remaining-- <= 0 || context.depth >= 12) { return '[truncated]'; }
+    if (isSensitiveDiagnosticKey(key) && value !== null && value !== undefined) {
+        if (typeof value === 'string') { return sanitizeDiagnosticString(value, key); }
+        if (typeof value === 'object') { return `[redacted-${normalizeDiagnosticKey(key)}]`; }
+        if (typeof value === 'number' && !/(?:count|length|size|bytes|found|present)$/i.test(key ?? '')) {
+            return redactedDiagnosticValue(String(value), normalizeDiagnosticKey(key));
+        }
+    }
+    if (typeof value === 'object' && value !== null && context.ancestors.has(value)) {
+        return '[circular]';
+    }
     const primitive = normalizePrimitive(value);
     if (primitive !== undefined) {
         if (typeof primitive === 'string') {
@@ -289,9 +336,16 @@ function normalizeValue(value: unknown, key?: string): DiagnosticValue | undefin
     }
 
     if (Array.isArray(value)) {
-        return value
-            .map(item => normalizeValue(item, key))
-            .filter((item): item is DiagnosticValue => item !== undefined);
+        context.ancestors.add(value);
+        context.depth++;
+        try {
+            return value.slice(0, 100)
+                .map(item => context.remaining > 0 ? normalizeValue(item, key, context) : undefined)
+                .filter((item): item is DiagnosticValue => item !== undefined);
+        } finally {
+            context.depth--;
+            context.ancestors.delete(value);
+        }
     }
 
     if (value instanceof Date) {
@@ -306,7 +360,7 @@ function normalizeValue(value: unknown, key?: string): DiagnosticValue | undefin
     }
 
     if (typeof value === 'object' && value !== null) {
-        return normalizeObject(value as Record<string, unknown>);
+        return normalizeObject(value as Record<string, unknown>, context);
     }
 
     if (value === undefined) {

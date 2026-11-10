@@ -21,10 +21,10 @@ test('resolveStableCommentThreadAnchorShape keeps anchors minimally non-empty on
     });
 });
 
-test('resolveStableCommentThreadAnchorShape falls back to the line break only for empty non-terminal lines', () => {
+test('resolveStableCommentThreadAnchorShape keeps empty-line anchors on the same line', () => {
     assert.deepEqual(resolveStableCommentThreadAnchorShape(0, true), {
         endCharacter: 0,
-        useLineBreakFallback: true,
+        useLineBreakFallback: false,
     });
 
     assert.deepEqual(resolveStableCommentThreadAnchorShape(0, false), {
@@ -91,7 +91,7 @@ test('resolveCommentThreadDisplayRange synthesizes a minimal fallback only for e
         lineTextLength: 0,
     }), {
         endCharacter: 0,
-        endLine: 8,
+        endLine: 7,
         startCharacter: 0,
         startLine: 7,
     });
@@ -204,4 +204,20 @@ test('shouldPinCommentThreadToStartAnchor pins offline create refreshes until se
         rootMessageId: 'server-message-1',
         synchronizationMode: 'online',
     }), false);
+});
+
+test('shouldPinCommentThreadToStartAnchor pins all offline and recovery rendering', () => {
+    assert.equal(shouldPinCommentThreadToStartAnchor({
+        isOfflineMode: true,
+        reason: 'transient_document_change',
+        rootMessageId: 'server-message-1',
+        synchronizationMode: 'offline',
+    }), true);
+
+    assert.equal(shouldPinCommentThreadToStartAnchor({
+        isOfflineMode: false,
+        reason: 'realtime_state_changed:recovering',
+        rootMessageId: 'server-message-1',
+        synchronizationMode: 'sync-recovery',
+    }), true);
 });

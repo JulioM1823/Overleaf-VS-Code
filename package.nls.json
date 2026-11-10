@@ -1,10 +1,8 @@
 {
-    "extension.displayName": "Overleaf Workshop",
-    "extension.description": "Open Overleaf/ShareLaTex projects in VSCode, with full collaboration support.",
-
+    "extension.displayName": "Overleaf-VS Code",
+    "extension.description": "Real-time, bidirectional Overleaf sync in VS Code, collaborative editing, offline drafts, chat, comments, and PDF preview.",
     "commands.remoteFileSystem.refreshLinkedFile.title": "Overleaf: Refresh File",
     "commands.remoteFileSystem.createLinkedFile.title": "Overleaf: Import File ...",
-
     "commands.projectManager.addServer.title": "Add New Server",
     "commands.projectManager.removeServer.title": "Remove Server",
     "commands.projectManager.loginServer.title": "Login to Server",
@@ -27,7 +25,6 @@
     "commands.projectManager.openProjectInCurrentWindow.title": "Open Project in Current Window",
     "commands.projectManager.openProjectInNewWindow.title": "Open Project in New Window",
     "commands.projectManager.openProjectLocalReplica.title": "Open Project Locally ...",
-
     "commands.projectHistory.refresh.title": "Refresh Project History",
     "commands.projectHistory.clearSelection.title": "Clear Selection",
     "commands.projectHistory.filterContributor.title": "Filter History by Contributor ...",
@@ -40,7 +37,6 @@
     "commands.projectHistory.downloadProject.title": "Download Project",
     "commands.projectHistory.revealHistoryView.title": "Focus on Overleaf History View",
     "commands.projectSCM.configSCM.title": "Configure Source Control ...",
-
     "commands.compileManager.compile.title": "Compile Project",
     "commands.compileManager.viewPdf.title": "View Compiled PDF",
     "commands.compileManager.openPdfExternal.title": "Open Compiled PDF Externally",
@@ -63,7 +59,6 @@
     "commands.comments.debug.inspectListeners.title": "Inspect Comment Event Listeners",
     "commands.comments.debug.forceReconcile.title": "Force Comment Reconcile",
     "commands.review.refresh.title": "Refresh Review",
-
     "commands.collaboration.revealChatView.title": "Focus on Overleaf Chat View",
     "commands.collaboration.composeChatMessage.title": "Compose Overleaf Chat Message",
     "commands.collaboration.jumpToUser.title": "Jump to Collaborator ...",
@@ -77,7 +72,6 @@
     "commands.diagnostics.toggleVerbose.title": "Toggle Verbose Diagnostics",
     "commands.diagnostics.setLevel.title": "Set Diagnostics Level",
     "commands.diagnostics.setSubsystemFilter.title": "Set Diagnostics Subsystem Filter",
-
     "configuration.compileOnSave.enabled.markdownDescription": "Always update the compiled PDF when a file is saved.",
     "configuration.compileOutputFolderName.markdownDescription": "The name of the folder where the compiled output files (e.g., `output.pdf`) is located. (Take effect after restarting VSCode)",
     "configuration.pdfViewer.themes.markdownDescription": "Configure the color themes used by the PDF viewer. (Take effect after restarting VSCode)",
@@ -98,7 +92,7 @@
     "configuration.diagnostics.maxBufferRecords.markdownDescription": "Maximum number of structured diagnostics records retained in memory.",
     "configuration.diagnostics.includeErrorStack.markdownDescription": "Include stack traces in structured diagnostics for `Error` values.",
     "configuration.diagnostics.consoleEnabled.markdownDescription": "Write diagnostics records to the extension host console.",
-    "configuration.diagnostics.outputChannel.enabled.markdownDescription": "Mirror diagnostics records to the Overleaf Workshop Diagnostics output channel.",
+    "configuration.diagnostics.outputChannel.enabled.markdownDescription": "Mirror diagnostics records to the Overleaf-VS Code Diagnostics output channel.",
     "configuration.comments.debug.enabled.markdownDescription": "Enable structured comment debug diagnostics and developer utilities.",
     "configuration.comments.debug.inline.markdownDescription": "Include inline comment renderer diagnostics, including create-focus timing and pending inline focus state, when comment debug mode is enabled.",
     "configuration.comments.debug.panel.markdownDescription": "Include review panel and panel-suppression diagnostics, including automatic Comments panel suppression attempts, when comment debug mode is enabled.",
@@ -106,7 +100,6 @@
     "configuration.comments.debug.lifecycle.markdownDescription": "Include comment lifecycle and subscription diagnostics when comment debug mode is enabled.",
     "configuration.comments.debug.eventBus.markdownDescription": "Include EventBus registration, disposal, and emission diagnostics for comment-related events.",
     "configuration.comments.debug.invariants.markdownDescription": "Emit invariant diagnostics for duplicate, drift, and identity conflicts in comment rendering.",
-
     "views.overleaf-workshop.projectManager.name": "Hosts",
     "views.explorer.overleaf-workshop.projectHistory": "History",
     "views.explorer.overleaf-workshop.contextualTitle": "Overleaf Project History",
@@ -114,6 +107,5 @@
     "views.explorer.overleaf-workshop.chatWebview.contextualTitle": "Overleaf Chat",
     "views.explorer.overleaf-workshop.reviewWebview.name": "Review",
     "views.explorer.overleaf-workshop.reviewWebview.contextualTitle": "Overleaf Review",
-
-    "customEditors.overleaf-workshop.pdfViewer.displayName": "Overleaf Workshop PDF Viewer"
+    "customEditors.overleaf-workshop.pdfViewer.displayName": "Overleaf-VS Code PDF Viewer"
 }

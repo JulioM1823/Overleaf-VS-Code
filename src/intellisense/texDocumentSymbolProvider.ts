@@ -146,8 +146,8 @@ async function parseTexFileStruct(fileContent:string): Promise<TexFileStruct>{
 
     // BFS: Traverse the texElements and build fileSymbol
     const queue: TeXElement[] = [...texSymbols];
-    while (queue.length > 0) {
-        const symbol = queue.shift();
+    for (let index = 0; index < queue.length; index++) {
+        const symbol = queue[index];
         switch (symbol?.type) {
             case TeXElementType.BibFile:
                 bibFilePaths.push(symbol.label);
@@ -173,8 +173,11 @@ async function parseTexFileStruct(fileContent:string): Promise<TexFileStruct>{
     };
 }
 
-class ProjectStructRecord {
+export class ProjectStructRecord {
     private fileRecordMap: Map<string, TexFileStruct> = new Map<string, TexFileStruct>();
+    private parseRequests = new Map<string, {sequence:number, promise:Promise<TexFileStruct>}>();
+    private parseSequence = 0;
+    private documentParses = new WeakMap<vscode.TextDocument, {version:number, sequence:number, promise:Promise<TexFileStruct>}>();
 
     constructor (private readonly vfs: VirtualFileSystem) {}
 
@@ -185,12 +188,15 @@ class ProjectStructRecord {
     async init() {
         const rootFileStruct = await this.refreshRecord( this.rootPath );
         const fileQueue: TexFileStruct[] = [ rootFileStruct ];
+        const visited = new Set([this.rootPath]);
 
         // iteratively traverse file node tree
-        while (fileQueue.length > 0) {
-            const fileNode = fileQueue.shift()!;
+        for (let index = 0; index < fileQueue.length; index++) {
+            const fileNode = fileQueue[index];
             const subFiles = fileNode.childrenPaths;
             for (const subFile of subFiles) {
+                if (visited.has(subFile)) { continue; }
+                visited.add(subFile);
                 // Get fileStruct can be failed due to file not exist
                 try {
                     const fileStruct = await this.refreshRecord(subFile);
@@ -213,35 +219,46 @@ class ProjectStructRecord {
         });
     }
 
-    async refreshRecord(source: vscode.TextDocument | string): Promise<TexFileStruct> {
-        let filePath:string, content: string;
-        // get file path and content
-        if (typeof source === 'string') {
-            filePath = normalizeProjectPath(source);
-            const uri = this.vfs.pathToUri(filePath);
-            content = new TextDecoder().decode( await this.vfs.openFile(uri) );
-        } else {
-            filePath = normalizeProjectPath(parseUri(source.uri).pathParts.join('/'));
-            content = source.getText();
+    refreshRecord(source: vscode.TextDocument | string): Promise<TexFileStruct> {
+        const filePath = normalizeProjectPath(typeof source==='string' ? source : parseUri(source.uri).pathParts.join('/'));
+        const previous = this.parseRequests.get(filePath);
+        const cached = typeof source==='string' ? undefined : this.documentParses.get(source);
+        if (typeof source!=='string' && cached && cached.version===source.version && cached.sequence===previous?.sequence) {
+            return cached.promise;
         }
+        const sequence = ++this.parseSequence;
+        const version = typeof source==='string' ? undefined : source.version;
+        const sourceText = typeof source==='string' ? undefined : source.getText();
+        const promise = (async () => {
+            const content = sourceText ?? new TextDecoder().decode(await this.vfs.openFile(this.vfs.pathToUri(filePath)));
 
-        // Normalize references against the source document path so nested main files resolve correctly.
-        const rawFileStruct = await parseTexFileStruct(content);
-        const fileStruct: TexFileStruct = {
-            texElements: rawFileStruct.texElements,
-            childrenPaths: rawFileStruct.childrenPaths
-                .map((childPath) => resolvePathFromFile(filePath, childPath, '.tex'))
-                .filter((childPath) => childPath!==''),
-            bibFilePaths: rawFileStruct.bibFilePaths
-                .flatMap((name) => name.split(','))
-                .map((name) => resolvePathFromFile(filePath, name, '.bib'))
-                .filter((bibPath) => bibPath!==''),
-            labels: rawFileStruct.labels,
-        };
+            // Resolve references against the source document path.
+            const rawFileStruct = await parseTexFileStruct(content);
+            const fileStruct: TexFileStruct = {
+                texElements: rawFileStruct.texElements,
+                childrenPaths: rawFileStruct.childrenPaths
+                    .map((childPath) => resolvePathFromFile(filePath, childPath, '.tex'))
+                    .filter((childPath) => childPath!==''),
+                bibFilePaths: rawFileStruct.bibFilePaths
+                    .flatMap((name) => name.split(','))
+                    .map((name) => resolvePathFromFile(filePath, name, '.bib'))
+                    .filter((bibPath) => bibPath!==''),
+                labels: rawFileStruct.labels,
+            };
 
-        // update file record
-        this.fileRecordMap.set(filePath, fileStruct);
-        return fileStruct;
+            // A slow disk read or parse must never replace a newer editor parse.
+            const latest = this.parseRequests.get(filePath);
+            if (latest?.sequence!==sequence) { return latest?.promise ?? fileStruct; }
+            this.fileRecordMap.set(filePath, fileStruct);
+            return fileStruct;
+        })();
+        this.parseRequests.set(filePath, {sequence, promise});
+        if (typeof source!=='string' && version!==undefined) { this.documentParses.set(source, {version, sequence, promise}); }
+        promise.catch(() => {
+            if (this.parseRequests.get(filePath)?.promise===promise) { this.parseRequests.delete(filePath); }
+            if (typeof source!=='string' && this.documentParses.get(source)?.promise===promise) { this.documentParses.delete(source); }
+        });
+        return promise;
     }
 
     getAllBibFilePaths(): string[] {
@@ -249,15 +266,18 @@ class ProjectStructRecord {
         if (rootStruct === undefined) { return []; }
 
         const queue = [rootStruct];
+        const visited = new Set([this.rootPath]);
         const bibFilePaths = new Set<string>();
         // iteratively traverse file node tree
-        while (queue.length > 0) {
-            const item = queue.shift()!;
+        for (let index = 0; index < queue.length; index++) {
+            const item = queue[index];
             item.bibFilePaths.forEach((path) => {
                 bibFilePaths.add(path);
             });
             // append children to queue
             item.childrenPaths.forEach( child => {
+                if (visited.has(child)) { return; }
+                visited.add(child);
                 const childItem = this.fileRecordMap.get(child);
                 childItem && queue.push(childItem);
             });
@@ -269,7 +289,12 @@ class ProjectStructRecord {
 export class TexDocumentSymbolProvider extends IntellisenseProvider implements vscode.DocumentSymbolProvider, vscode.FoldingRangeProvider, vscode.DefinitionProvider {
     protected readonly contextPrefix = [];
 
-    private projectRecordMap = new Map<string, ProjectStructRecord>();
+    private projectRecordMap = new Map<string, {vfs: VirtualFileSystem, record: Promise<ProjectStructRecord>, resolved?: ProjectStructRecord}>();
+
+    private projectKey(uri: vscode.Uri) {
+        const {serverName, userId, projectId} = parseUri(uri);
+        return JSON.stringify([serverName, userId, projectId]);
+    }
 
     private logDiagnostic(event: string, fields: Record<string, unknown> = {}, error?: unknown) {
         logDiagnostic('ReferenceNavigation', event, fields, error);
@@ -277,24 +302,29 @@ export class TexDocumentSymbolProvider extends IntellisenseProvider implements v
 
     private async getProjectContext(document: vscode.TextDocument) {
         const vfs = await this.vfsm.prefetch(document.uri);
-        const {projectName} = parseUri(document.uri);
-
-        let projectRecord = this.projectRecordMap.get(projectName);
-        if (projectRecord === undefined) {
-            projectRecord = new ProjectStructRecord(vfs);
-            await projectRecord.init();
-            this.projectRecordMap.set(projectName, projectRecord);
+        const key = this.projectKey(document.uri);
+        let entry = this.projectRecordMap.get(key);
+        if (!entry || entry.vfs!==vfs) {
+            const projectRecord = new ProjectStructRecord(vfs);
+            const record = projectRecord.init().then(() => {
+                const current = this.projectRecordMap.get(key);
+                if (current?.record===record) { current.resolved = projectRecord; }
+                return projectRecord;
+            });
+            entry = {vfs, record};
+            this.projectRecordMap.set(key, entry);
+            record.catch(() => {
+                if (this.projectRecordMap.get(key)?.record===record) { this.projectRecordMap.delete(key); }
+            });
         }
-
-        return {vfs, projectRecord};
+        return {vfs, projectRecord: await entry.record};
     }
 
     async provideFoldingRanges(document: vscode.TextDocument, context: vscode.FoldingContext, token: vscode.CancellationToken): Promise<vscode.FoldingRange[]> {
         const environmentRange = getEnvironmentFoldingRange(document);
 
         // Try get fileStruct
-        const {projectName} = parseUri(document.uri);
-        let projectRecord = this.projectRecordMap.get(projectName);
+        const projectRecord = await this.projectRecordMap.get(this.projectKey(document.uri))?.record;
         const fileStruct = projectRecord?.getTexFileStruct(document);
 
         return environmentRange.concat( fileStruct ? elementsToFoldingRanges(fileStruct.texElements) : [] );
@@ -304,7 +334,7 @@ export class TexDocumentSymbolProvider extends IntellisenseProvider implements v
         const {projectRecord} = await this.getProjectContext(document);
 
         // return symbols
-        const fileStruct = projectRecord.getTexFileStruct(document) ?? await projectRecord.refreshRecord(document);
+        const fileStruct = await projectRecord.refreshRecord(document);
         return elementsToSymbols( fileStruct.texElements );
     }
 
@@ -351,9 +381,8 @@ export class TexDocumentSymbolProvider extends IntellisenseProvider implements v
         const uri = vscode.window.activeTextEditor?.document.uri;
         if (uri?.scheme !== ROOT_NAME) { return []; }
         // get bib file paths
-        const {projectName} = parseUri(uri);
-        const projectRecord = this.projectRecordMap.get(projectName);
-        return projectRecord?.getAllBibFilePaths() ?? [];
+        // This synchronous API exposes only a completed record.
+        return this.projectRecordMap.get(this.projectKey(uri))?.resolved?.getAllBibFilePaths() ?? [];
     }
 
     async getBibFilePaths(document: vscode.TextDocument): Promise<string[]> {
@@ -375,10 +404,13 @@ export class TexDocumentSymbolProvider extends IntellisenseProvider implements v
             vscode.languages.registerDefinitionProvider(latexSelector, this),
             // register file change listener
             vscode.workspace.onDidChangeTextDocument(async (e) => {
-                const {projectName} = parseUri(e.document.uri);
-                const projectRecord = this.projectRecordMap.get(projectName);
-                projectRecord?.refreshRecord(e.document);
+                if (e.document.uri.scheme!==ROOT_NAME || e.contentChanges.length===0) { return; }
+                const entry = this.projectRecordMap.get(this.projectKey(e.document.uri));
+                await entry?.record.then(record => record.refreshRecord(e.document)).catch(error => {
+                    this.logDiagnostic('project_index.refresh_failed', {}, error);
+                });
             }),
+            new vscode.Disposable(() => this.projectRecordMap.clear()),
         ];
     }
 }

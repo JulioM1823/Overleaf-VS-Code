@@ -15,6 +15,8 @@ import { consumePendingLocalReplicaAuxiliaryBarClose } from './core/localReplica
 import { resolveActiveProjectWorkspaceBinding } from './core/projectWorkspaceBinding';
 import { logDiagnostic } from './utils/diagnostics';
 
+let persistOpenDrafts: (() => Promise<void>) | undefined;
+
 export function activate(context: vscode.ExtensionContext) {
     const diagnosticsManager = new DiagnosticsManager(context);
     context.subscriptions.push(...diagnosticsManager.triggers);
@@ -33,6 +35,10 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Register: [core] DocumentSessionManager for near real-time text sync
     const documentSessionManager = new DocumentSessionManager(remoteFileSystemProvider);
+    persistOpenDrafts = async () => {
+        try { await documentSessionManager.persistOpenDrafts(); }
+        finally { await remoteFileSystemProvider.flushPendingWrites(); }
+    };
     context.subscriptions.push( ...documentSessionManager.triggers );
 
     // Register: [core] ProjectManagerProvider on Activitybar
@@ -137,7 +143,8 @@ export function activate(context: vscode.ExtensionContext) {
     });
 }
 
-export function deactivate() {
+export async function deactivate() {
+    await persistOpenDrafts?.();
     logDiagnostic('Extension', 'lifecycle.deactivate', {}, undefined, {
         category: 'core',
         level: 'info',

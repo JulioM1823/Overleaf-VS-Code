@@ -164,3 +164,12 @@ test('applyPendingReviewLocalMutations keeps a delete applied until refreshed en
         threadId: 'thread-1',
     }]);
 });
+
+test('explicit thread deletion removes replies and suppresses a stale review snapshot until absence is confirmed',()=>{
+    const deletion={kind:'deleteThread',threadId:'thread-1',messageId:'message-root'};
+    const first=applyPendingReviewLocalMutations([createEntry()],[deletion]);
+    assert.deepEqual(first.entries,[]);assert.deepEqual(first.retainedMutations,[deletion]);
+    const stale=applyPendingReviewLocalMutations([createEntry()],first.retainedMutations);
+    assert.deepEqual(stale.entries,[]);
+    assert.deepEqual(applyPendingReviewLocalMutations([],stale.retainedMutations).retainedMutations,[]);
+});

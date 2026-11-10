@@ -9,5 +9,10 @@ export function reconstructDocumentFromDiff(diff?: DocDiffChunk[]): string | und
         return undefined;
     }
 
-    return diff.map((entry) => entry.u ?? entry.i ?? entry.d ?? '').join('');
+    // The target revision contains unchanged and inserted chunks only.
+    // Deleted chunks belong to the old revision and must never be resurrected.
+    if (diff.some(entry => !entry || [entry.u, entry.i, entry.d].some(value => value!==undefined && typeof value!=='string'))) {
+        return undefined;
+    }
+    return diff.map((entry) => entry.u ?? entry.i ?? '').join('');
 }

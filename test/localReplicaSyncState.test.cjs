@@ -74,14 +74,14 @@ test('classifyLocalReplicaRuntimeSync preserves conflicted paths until they are 
     );
 });
 
-test('classifyLocalReplicaRuntimeSync bootstraps when no baseline exists and one side is missing', () => {
+test('classifyLocalReplicaRuntimeSync refuses bootstrap deletion without a baseline', () => {
     assert.deepEqual(
         classifyLocalReplicaRuntimeSync(
             undefined,
             createLocalReplicaSnapshot('missing'),
             textSnapshot('remote'),
         ),
-        {kind: 'apply', reason: 'bootstrap'},
+        {kind: 'conflict', reason: 'missing_baseline'},
     );
 });
 
@@ -146,4 +146,31 @@ test('parsePersistedLocalReplicaSyncState tolerates malformed path payloads', ()
         paths: {},
         version: 1,
     });
+});
+
+test('snapshot equality distinguishes colliding strings and different invalid UTF-8 bytes', () => {
+    for (const [left, right] of [[Buffer.from('Aa'), Buffer.from('BB')], [Buffer.from([0x80]), Buffer.from([0x81])]]) {
+        assert.equal(localReplicaSnapshotsEqual(createLocalReplicaSnapshot('file', left), createLocalReplicaSnapshot('file', right)), false);
+    }
+});
+
+test('legacy numeric file hashes never authorize an overwrite', () => {
+    const old = {kind: 'file', hash: 2112, size: 2};
+    assert.equal(localReplicaSnapshotsEqual(old, old), false);
+    assert.equal(classifyLocalReplicaReconcile({baseline: old}, textSnapshot('Aa'), textSnapshot('BB')).kind, 'conflict');
+});
+
+test('replica merge preserves competing replacements as a conflict', () => {
+    assert.equal(mergeLocalReplicaText(Buffer.from('abc'), Buffer.from('axc'), Buffer.from('ayc')).kind, 'conflict');
+});
+
+test('replica merge never round-trips invalid UTF-8 and preserves a UTF-8 BOM', () => {
+    assert.equal(mergeLocalReplicaText(Buffer.from([0x80]), Buffer.from([0x81]), Buffer.from([0x82])).kind, 'conflict');
+    const merged = mergeLocalReplicaText(Buffer.from('\ufeffab'), Buffer.from('\ufeffaLb'), Buffer.from('\ufeffabR'));
+    assert.equal(Buffer.from(merged.mergedContent).toString(), '\ufeffaLbR');
+});
+
+test('missing baseline cannot authorize deleting or replacing an existing target', () => {
+    assert.equal(classifyLocalReplicaRuntimeSync(undefined, createLocalReplicaSnapshot('missing'), textSnapshot('unsaved')).kind, 'conflict');
+    assert.equal(classifyLocalReplicaRuntimeSync(undefined, textSnapshot('new'), textSnapshot('unsaved')).kind, 'conflict');
 });

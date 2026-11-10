@@ -9,6 +9,7 @@ const {
     COLLABORATOR_CONNECTION_INDICATOR_CONNECTED_HOLD_MS,
     createCollaboratorQuickPickItem,
     didCollaboratorMove,
+    escapeCollaboratorMarkdownText,
     formatCollaboratorActivityAge,
     formatCollaboratorCursorInfo,
     resolveCollaboratorConnectionIndicatorState,
@@ -16,6 +17,17 @@ const {
     resolveCollaboratorCursorColor,
     sortCollaboratorQuickPickItems,
 } = require('../out/collaboration/clientManagerHelpers.js');
+
+test('escapeCollaboratorMarkdownText escapes remote collaborator markup', () => {
+    const escaped = escapeCollaboratorMarkdownText('Ada](command:evil) ![x](https://leak.example/a)\n<img src=x>');
+
+    assert.equal(escaped.includes(']('), false);
+    assert.equal(escaped.includes('!['), false);
+    assert.equal(escaped.includes('<img src=x>'), false);
+    assert.equal(escaped.includes('\n'), false);
+    assert.match(escaped, /Ada\\\]/);
+    assert.match(escaped, /\\<img src=x\\>/);
+});
 
 test('formatCollaboratorCursorInfo keeps first-line locations visible', () => {
     assert.deepEqual(formatCollaboratorCursorInfo('/main.tex', 0), {

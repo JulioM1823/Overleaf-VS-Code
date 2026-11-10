@@ -1,9 +1,9 @@
-# Overleaf Workshop Wiki
+# Overleaf-VS Code Wiki
 
-Overleaf Workshop is an open-source extension for Overleaf users to manage projects, edit documents, and collaborate in Visual Studio Code.
+Overleaf-VS Code is an open-source extension for Overleaf users to manage projects, edit documents, and collaborate in Visual Studio Code.
 The name of the extension is inspired by the well-known [LaTeX Workshop Extension](https://github.com/James-Yu/LaTeX-Workshop).
 
-The aim of Overleaf Workshop is to provide a seamless experience for Overleaf users to enjoy the service of Overleaf in VS Code just like in the web browser, while benefiting from the powerful features and extensions of VS Code.
+The aim of Overleaf-VS Code is to provide a seamless experience for Overleaf users to enjoy the service of Overleaf in VS Code just like in the web browser, while benefiting from the powerful features and extensions of VS Code.
 
 
 ## Servers Management
@@ -133,17 +133,17 @@ If you want to add a project to multiple tags, please manage the tags on the web
 
 ![screenshot-open-project](assets/screenshot-open-project.png)
 
-The Overleaf Workshop extension by default will open you project in a [virtual workspace](https://code.visualstudio.com/api/extension-guides/virtual-workspaces), just like the [WSL Extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-wsl).
+The Overleaf-VS Code extension by default will open you project in a [virtual workspace](https://code.visualstudio.com/api/extension-guides/virtual-workspaces), just like the [WSL Extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-wsl).
 You can choose to open the project in the current window or a new window. If you open the project in the current window, the current workspace will be replaced with the corresponding virtual workspace of the project.
 
-However, due to the [limitation of the virtual workspace](https://github.com/microsoft/vscode/wiki/Virtual-Workspaces#signal-whether-your-extension-can-handle-virtual-workspaces), most of the existing VS Code extensions does not work in the virtual workspace. Meanwhile, the Overleaf Workshop extension is still under active development, and cannot compete with the matured [LaTeX Workshop Extension](https://github.com/James-Yu/LaTeX-Workshop) in terms of features and stability. In this case, you can choose to open the project locally.
+However, due to the [limitation of the virtual workspace](https://github.com/microsoft/vscode/wiki/Virtual-Workspaces#signal-whether-your-extension-can-handle-virtual-workspaces), most of the existing VS Code extensions does not work in the virtual workspace. Meanwhile, the Overleaf-VS Code extension is still under active development, and cannot compete with the matured [LaTeX Workshop Extension](https://github.com/James-Yu/LaTeX-Workshop) in terms of features and stability. In this case, you can choose to open the project locally.
 
 #### Open Project Locally
 
 > [!NOTE]
 > The Overleaf features are not completely enabled in a local folder. Specifically, the [compile](#compile-project), [PDF preview](#preview-document), [intellisense](#intellisense) and [project history](#history-of-changes) features are disabled by default.
 > 
-> Currently, there is no way to enable these features in a local folder, especially considering people would like to use the LaTeX Workshop extension in a local folder. If you are in demand of these features, please consider to create a discussion in the [GitHub Discussions](https://github.com/overleaf-workshop/Overleaf-Workshop/discussions)
+> Currently, there is no way to enable these features in a local folder, especially considering people would like to use the LaTeX Workshop extension in a local folder. If you are in demand of these features, please consider to create an issue in the [GitHub Issues](https://github.com/JulioM1823/Overleaf-VS-Code/issues)
 
 The "Open Project Locally" feature is provided via a [local replica](#local-replica). The local replica is a folder on your local machine with a `.overleaf` folder presence, which is kept in sync with the project on the Overleaf server.
 
@@ -181,7 +181,7 @@ For the Overleaf Server Pro Edition server, you can [share files across project]
 
 ![screenshot-pro-import-external-file](assets/screenshot-pro-import-external-file.png)
 
-In the Overleaf Workshop extension, the linked files are displayed in the file explorer as a symbolic link, and you can right click on the linked file to refresh it via **"Overleaf: Refresh File"**.
+In the Overleaf-VS Code extension, the linked files are displayed in the file explorer as a symbolic link, and you can right click on the linked file to refresh it via **"Overleaf: Refresh File"**.
 
 ![screenshot-pro-refresh-external-file](assets/screenshot-pro-refresh-external-file.png)
 
@@ -189,7 +189,7 @@ You can also right click on a folder to import a linked file via **"Overleaf: Im
 
 ### Compile the Project
 
-Different from the Overleaf web editor with an eye-catching `Recompile` button, the compile in Overleaf Workshop extension is triggered via shortcut <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>B</kbd>.
+Different from the Overleaf web editor with an eye-catching `Recompile` button, the compile in Overleaf-VS Code extension is triggered via shortcut <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>B</kbd>.
 
 The compile status is displayed in the status bar, which is located at the bottom of the VS Code window.
 
@@ -387,7 +387,7 @@ The available commands and default shortcuts can be found in the command palette
 - **"Set Compiler"**: This command is used to change the compiler of the current project.
 - **"Set Root Document"**: This command is used to change the root document to be compiled of the current project.
 
-Let us know if you have any suggestions for the commands and shortcuts in the [GitHub Discussions](https://github.com/overleaf-workshop/Overleaf-Workshop/discussions).
+Let us know if you have any suggestions for the commands and shortcuts in the [GitHub Issues](https://github.com/JulioM1823/Overleaf-VS-Code/issues).
 
 ### Compatibility Notes
 
@@ -423,7 +423,7 @@ The project-irrelevant configurations of the extension can be found in the VS Co
 
 #### Q1: How to compile and show the compiled PDF?
 
-**A1**: Different from the Overleaf web editor with an eye-catching `Recompile` button, the compile in Overleaf Workshop extension is triggered via shortcut <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>B</kbd>.
+**A1**: Different from the Overleaf web editor with an eye-catching `Recompile` button, the compile in Overleaf-VS Code extension is triggered via shortcut <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>B</kbd>.
 
 The primary compiled PDF is exposed next to the root document, while auxiliary compile artifacts stay in the `.output` folder by default. You can also use the shortcut <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd> to open the compiled PDF directly.
 
@@ -445,4 +445,4 @@ Please notice that not all Overleaf features enabled in a local folder. More spe
 - Enable/Disable the network proxy for VS Code (or the Overleaf server domain) globally.
 - Try [Invisible Mode](#invisible-mode), which does not use WebSocket to communicate with the server.
 
-If the above solutions do not work, please consider to create a bug report in the [GitHub Issues](https://github.com/overleaf-workshop/Overleaf-Workshop/issues/new/choose).
+If the above solutions do not work, please consider to create a bug report in the [GitHub Issues](https://github.com/JulioM1823/Overleaf-VS-Code/issues/new/choose).

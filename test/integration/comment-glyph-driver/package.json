@@ -1,0 +1,14 @@
+{
+  "name": "overleaf-comment-glyph-audit-driver",
+  "publisher": "overleaf-audit",
+  "version": "0.0.1",
+  "engines": {"vscode": "^1.80.0"},
+  "main": "index.cjs",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {"commands": [
+    {"command": "overleaf-glyph-audit.addSecondThread", "title": "Glyph audit: Add second thread"},
+    {"command": "overleaf-glyph-audit.disposeThreads", "title": "Glyph audit: Dispose threads"},
+    {"command": "overleaf-glyph-audit.restoreThread", "title": "Glyph audit: Restore thread"}
+  ]},
+  "capabilities": {"untrustedWorkspaces": {"supported": true}}
+}

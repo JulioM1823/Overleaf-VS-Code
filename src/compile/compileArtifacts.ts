@@ -17,6 +17,11 @@ export function isPdfArtifact(artifact: CompileArtifactLike) {
     return normalizedType === 'pdf' || normalizedPath.toLowerCase().endsWith('.pdf');
 }
 
+export function isCompileLogArtifact(artifact: CompileArtifactLike) {
+    const normalizedPath = normalizeCompileArtifactPath(artifact.path || artifact.name || '').toLowerCase();
+    return normalizedPath === 'output.log' || normalizedPath.endsWith('/output.log');
+}
+
 function basename(path: string) {
     const normalizedPath = normalizeCompileArtifactPath(path);
     const parts = normalizedPath.split('/');

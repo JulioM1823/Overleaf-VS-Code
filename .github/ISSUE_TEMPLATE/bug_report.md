@@ -20,7 +20,7 @@ assignees: ''
 
 
 ### Environment
- - **Overleaf Workshop Extension version**: [e.g., 0.7.0]
+ - **Overleaf-VS Code Extension version**: [e.g., 0.7.0]
  - **VS Code version**: [e.g. 1.85.0]
  - **Overleaf Edition**: Official / Community / Enterprise (Server Pro)
 

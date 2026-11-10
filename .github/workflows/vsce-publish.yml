@@ -1,0 +1,24 @@
+name: Publish tested Marketplace package
+permissions:
+  contents: read
+on:
+  workflow_dispatch: {}
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci && npm ci --prefix views/chat-view
+      - run: npm test
+      - run: npx --yes @vscode/vsce@4.1.0 package --out orbitleaf.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbitleaf-vsix
+          path: orbitleaf.vsix
+      - name: Publish the packaged file
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: npx --yes @vscode/vsce@4.1.0 publish --packagePath orbitleaf.vsix

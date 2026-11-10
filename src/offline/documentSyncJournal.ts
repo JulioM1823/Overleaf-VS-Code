@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import { AsyncQueue } from '../utils/asyncQueue';
+import { assertSafeLocalPath, isMissingFile, writePrivateFile } from '../utils/safeFile';
 import {
     createBlobId,
     createPersistedDocumentSyncState,
@@ -8,6 +10,11 @@ import {
     PersistedDocumentSyncState,
     serializePersistedDocumentSyncState,
 } from './documentSyncJournalState';
+import {
+    restrictPrivateDirectoryPermissions,
+    restrictPrivateFilePermissions,
+} from '../utils/filePrivacy';
+import { ensureLocalReplicaMetadataDirectory } from '../scm/localReplicaWorkspace';
 
 const DOCUMENT_SYNC_STATE_FILE_NAME = 'document-sync-state.json';
 const DOCUMENT_SYNC_BLOB_DIRECTORY_NAME = 'blobs';
@@ -28,82 +35,104 @@ export interface DocumentSyncJournalStorage {
 
 function sanitizeRelPathForDirectory(relPath: string) {
     const normalized = relPath === '/' ? 'root' : relPath.replace(/^\/+/, '');
-    return normalized.replace(/[\/\\]/g, '__');
+    return normalized.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
 }
 
 export class DocumentSyncJournal {
+    private readonly transactions = new AsyncQueue();
     constructor(
         private readonly resolveStorage: () => Promise<DocumentSyncJournalStorage>,
     ) {}
 
-    async loadState(): Promise<PersistedDocumentSyncState> {
-        const {stateUri} = await this.resolveStorage();
+    loadState(): Promise<PersistedDocumentSyncState> {
+        return this.transactions.run(() => this.readState());
+    }
+
+    private async readState(): Promise<PersistedDocumentSyncState> {
+        const {stateUri, storageRoot} = await this.resolveStorage();
+        await assertSafeLocalPath(storageRoot, stateUri);
         try {
             const raw = await vscode.workspace.fs.readFile(stateUri);
             return parsePersistedDocumentSyncState(new TextDecoder().decode(raw));
-        } catch {
-            return createPersistedDocumentSyncState();
+        } catch (error) {
+            if (isMissingFile(error)) { return createPersistedDocumentSyncState(); }
+            throw error;
         }
     }
 
-    async saveState(state: PersistedDocumentSyncState) {
+    private async saveState(state: PersistedDocumentSyncState) {
         const {storageRoot, stateUri} = await this.resolveStorage();
-        await vscode.workspace.fs.createDirectory(storageRoot);
-        await vscode.workspace.fs.writeFile(stateUri, Buffer.from(serializePersistedDocumentSyncState(state)));
+        await ensureLocalReplicaMetadataDirectory(storageRoot);
+        await writePrivateFile(stateUri, Buffer.from(serializePersistedDocumentSyncState(state)));
+        await restrictPrivateFilePermissions(stateUri);
     }
 
     async withState<T>(updater: (state: PersistedDocumentSyncState) => T | Promise<T>) {
-        const state = await this.loadState();
-        const result = await updater(state);
-        await this.saveState(state);
-        return result;
+        return this.transactions.run(async () => {
+            const state = await this.readState();
+            const result = await updater(state);
+            await this.saveState(state);
+            return result;
+        });
     }
 
     async readBlob(blobId: string): Promise<Uint8Array | undefined> {
-        const {blobDirectoryUri} = await this.resolveStorage();
+        if (!/^[a-f0-9]{64}$/.test(blobId)) { throw new Error('Invalid recovery blob identifier'); }
+        const {blobDirectoryUri, storageRoot} = await this.resolveStorage();
+        const uri = vscode.Uri.joinPath(blobDirectoryUri, blobId);
+        await assertSafeLocalPath(storageRoot, uri);
         try {
-            return await vscode.workspace.fs.readFile(vscode.Uri.joinPath(blobDirectoryUri, blobId));
-        } catch {
-            return undefined;
+            const content = await vscode.workspace.fs.readFile(uri);
+            if (createBlobId(content)!==blobId) { throw new Error('Recovery blob checksum mismatch'); }
+            return content;
+        } catch (error) {
+            if (isMissingFile(error)) { return undefined; }
+            throw error;
         }
     }
 
     async writeBlob(content: Uint8Array): Promise<string> {
-        const {blobDirectoryUri} = await this.resolveStorage();
+        const {blobDirectoryUri, storageRoot} = await this.resolveStorage();
         const blobId = createBlobId(content);
         const blobUri = vscode.Uri.joinPath(blobDirectoryUri, blobId);
+        await ensureLocalReplicaMetadataDirectory(storageRoot);
+        await assertSafeLocalPath(storageRoot, blobUri);
         await vscode.workspace.fs.createDirectory(blobDirectoryUri);
-        try {
-            await vscode.workspace.fs.stat(blobUri);
-            return blobId;
-        } catch {
-            await vscode.workspace.fs.writeFile(blobUri, content);
-            return blobId;
-        }
+        await restrictPrivateDirectoryPermissions(blobDirectoryUri);
+        const existing = await this.readBlob(blobId);
+        if (!existing) { await writePrivateFile(blobUri, content); }
+        return blobId;
     }
 
     async materializeConflictFiles(relPath: string, conflict: DocumentSyncConflictState): Promise<DocumentSyncConflictMaterialization> {
-        const {conflictDirectoryUri} = await this.resolveStorage();
+        const {conflictDirectoryUri, storageRoot} = await this.resolveStorage();
         const baseContent = conflict.baseBlobId ? await this.readBlob(conflict.baseBlobId) : undefined;
         const localContent = conflict.localBlobId ? await this.readBlob(conflict.localBlobId) : undefined;
         const remoteContent = conflict.remoteBlobId ? await this.readBlob(conflict.remoteBlobId) : undefined;
         const targetDirectory = vscode.Uri.joinPath(
             conflictDirectoryUri,
-            `${sanitizeRelPathForDirectory(relPath)}-${conflict.detectedAt.replace(/[:.]/g, '-')}`,
+            `${sanitizeRelPathForDirectory(relPath)}-${createBlobId(Buffer.from(relPath + '\0' + conflict.detectedAt)).slice(0, 24)}`,
         );
+        await ensureLocalReplicaMetadataDirectory(storageRoot);
+        await assertSafeLocalPath(storageRoot, targetDirectory);
         await vscode.workspace.fs.createDirectory(targetDirectory);
+        await restrictPrivateDirectoryPermissions(conflictDirectoryUri);
+        await restrictPrivateDirectoryPermissions(targetDirectory);
         const result: DocumentSyncConflictMaterialization = {};
         if (baseContent) {
             result.base = vscode.Uri.joinPath(targetDirectory, 'base');
-            await vscode.workspace.fs.writeFile(result.base, baseContent);
+            await writePrivateFile(result.base, baseContent);
+            await restrictPrivateFilePermissions(result.base);
         }
         if (localContent) {
             result.local = vscode.Uri.joinPath(targetDirectory, 'local');
-            await vscode.workspace.fs.writeFile(result.local, localContent);
+            await writePrivateFile(result.local, localContent);
+            await restrictPrivateFilePermissions(result.local);
         }
         if (remoteContent) {
             result.remote = vscode.Uri.joinPath(targetDirectory, 'remote');
-            await vscode.workspace.fs.writeFile(result.remote, remoteContent);
+            await writePrivateFile(result.remote, remoteContent);
+            await restrictPrivateFilePermissions(result.remote);
         }
         return result;
     }

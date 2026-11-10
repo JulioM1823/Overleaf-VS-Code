@@ -10,16 +10,17 @@ import { logDiagnostic } from '../utils/diagnostics';
 
 type SnippetItemMap = {[K:string]: SnippetItemSchema};
 type FilePathCompletionType = 'text' | 'image' | 'bib';
+type CustomCommandData = {metadata: SnippetItemMap, commands: Map<string, SnippetItemMap>};
 
 export class CommandCompletionProvider extends IntellisenseProvider implements vscode.CompletionItemProvider {
     protected readonly contextPrefix = [['']];
-    private constantData?: SnippetItemMap;
-    private customData: {
-        [K:string]: {
-            metadata: SnippetItemMap,
-            commands: Map<string, SnippetItemMap>,
-        }
-    } = {};
+    private constantData?: Promise<SnippetItemMap>;
+    private customData = new Map<string, {vfs:VirtualFileSystem, data:Promise<CustomCommandData>}>();
+
+    private projectKey(uri: vscode.Uri) {
+        const {serverName, userId, projectId} = parseUri(uri);
+        return JSON.stringify([serverName, userId, projectId]);
+    }
 
     constructor(
         protected readonly vfsm: RemoteFileSystemProvider,
@@ -55,10 +56,9 @@ export class CommandCompletionProvider extends IntellisenseProvider implements v
         return metadata;
     }
 
-    private async loadCommands(uri: vscode.Uri): Promise<SnippetItemMap> {
+    private async loadCommands(uri: vscode.Uri, sourceText?: string): Promise<SnippetItemMap> {
         const regex = /\\(?:newcommand|renewcommand)\{\\(\w+)\}(\[(\d)\])?(\[(\d)\])?/g;
-        const vfs = await this.vfsm.prefetch(uri);
-        const content = new TextDecoder().decode( await vfs.openFile(uri) );
+        const content = sourceText ?? new TextDecoder().decode(await (await this.vfsm.prefetch(uri)).openFile(uri));
 
         let commands: SnippetItemMap = {};
         let match: RegExpExecArray | null;
@@ -95,35 +95,45 @@ export class CommandCompletionProvider extends IntellisenseProvider implements v
 
     private async load(uri: vscode.Uri, force: boolean = false) {
         if (this.constantData===undefined) {
-            this.constantData = {};
-            const snippetsArray = await this.loadJson('data/latex/top-hundred-snippets.json') as any[];
-            for (const item of snippetsArray) {
-                const {caption,snippet,meta,score} = item;
-                this.constantData[caption] = {caption, snippet, meta, score};
-            }
+            const promise = this.loadJson('data/latex/top-hundred-snippets.json').then((snippetsArray: SnippetItemSchema[]) => {
+                const data: SnippetItemMap = Object.create(null);
+                for (const item of snippetsArray) {
+                    const {caption,snippet,meta,score} = item;
+                    data[caption] = {caption, snippet, meta, score};
+                }
+                return data;
+            });
+            this.constantData = promise;
+            promise.catch(() => { if (this.constantData===promise) { this.constantData = undefined; } });
         }
-
-        const {identifier} = parseUri(uri);
-        if (this.customData[identifier]===undefined || force) {
-            this.customData[identifier] = {
-                metadata: await this.loadMetadata(uri) || {},
-                commands: await this.reloadCommands(uri) || {},
-            };
+        const constantData = this.constantData;
+        const vfs = await this.vfsm.prefetch(uri);
+        const key = this.projectKey(uri);
+        let entry = this.customData.get(key);
+        if (!entry || entry.vfs!==vfs || force) {
+            const data = Promise.all([this.loadMetadata(uri), this.reloadCommands(uri)])
+                .then(([metadata, commands]) => ({metadata, commands}));
+            entry = {vfs, data};
+            this.customData.set(key, entry);
+            data.catch(() => { if (this.customData.get(key)?.data===data) { this.customData.delete(key); } });
         }
+        const [constants, custom] = await Promise.all([constantData, entry.data]);
+        return {constants, custom};
     }
 
     private async getCompletionItems(uri:vscode.Uri, partial:string, wholeRange:vscode.Range): Promise<vscode.CompletionItem[]> {
-        await this.load(uri);
-        const {identifier} = parseUri(uri);
+        const {constants, custom} = await this.load(uri);
 
-        let commands:SnippetItemMap = {};
-        this.customData[identifier].commands.forEach((item) => {
-            commands = {...item, ...commands};
+        const commands:SnippetItemMap = Object.create(null);
+        custom.commands.forEach((item) => {
+            for (const [key, value] of Object.entries(item)) {
+                if (!Object.prototype.hasOwnProperty.call(commands, key)) { commands[key] = value; }
+            }
         });
 
         const snippets = {
-                    ...this.constantData,
-                    ...this.customData[identifier].metadata,
+                    ...constants,
+                    ...custom.metadata,
                     ...commands,
                 };
         return Object.entries(snippets)
@@ -154,11 +164,16 @@ export class CommandCompletionProvider extends IntellisenseProvider implements v
             // trigger on document save
             vscode.workspace.onDidSaveTextDocument(async doc => {
                 if (doc.uri.scheme === ROOT_NAME && doc.uri.path.endsWith('.tex')) {
-                    const {identifier} = parseUri(doc.uri);
-                    const commands = await this.loadCommands(doc.uri);
-                    this.customData[identifier]?.commands.set(doc.uri.path, commands);
+                    const entry = this.customData.get(this.projectKey(doc.uri));
+                    if (!entry) { return; }
+                    try {
+                        const data = await entry.data;
+                        const commands = await this.loadCommands(doc.uri, doc.getText());
+                        data.commands.set(parseUri(doc.uri).pathParts.join('/'), commands);
+                    } catch (error) { logDiagnostic('CommandCompletion', 'commands.refresh_failed', {}, error); }
                 }
             }),
+            new vscode.Disposable(() => this.customData.clear()),
         ];
     }
 }

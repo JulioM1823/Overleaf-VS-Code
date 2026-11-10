@@ -1,11 +1,11 @@
 # Compatibility Notes
 
-This document records editor and platform constraints that affect how Overleaf Workshop can behave.
+This document records editor and platform constraints that affect how Overleaf-VS Code can behave.
 It exists to keep implementation plans realistic and to reduce repeated investigation work during issue triage.
 
 ## Visual Studio Code
 
-Overleaf Workshop is developed and validated against Visual Studio Code's extension APIs.
+Overleaf-VS Code is developed and validated against Visual Studio Code's extension APIs.
 The extension's core workflows are expected to work in VS Code:
 
 - server authentication
@@ -34,7 +34,7 @@ The extension's core workflows are expected to work in VS Code:
   - AI editing tools can require `file:`-backed resources and may not fully operate on custom filesystem schemes such as `overleaf-workshop:`.
   - This is not always fixable inside the extension without introducing unsafe filesystem bridging behavior.
 - Supported expectation:
-  - Standard text editing in Overleaf Workshop files is supported.
+  - Standard text editing in Overleaf-VS Code files is supported.
   - AI-assisted bulk edit or agentic edit flows may fail or be degraded on virtual resources.
 - Current recommendation:
   - Use local replica mode for AI editing workflows that require normal filesystem files.

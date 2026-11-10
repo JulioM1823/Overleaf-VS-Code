@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "postinstall": "node ../../node_modules/patch-package/index.js",
     "dev": "vite",
     "build": "run-p type-check \"build-only {@}\" --",
     "preview": "vite preview",
@@ -14,12 +15,10 @@
     "@vscode/codicons": "^0.0.33",
     "@vscode/webview-ui-toolkit": "^1.2.2",
     "@vueuse/core": "^10.5.0",
-    "markdown-it": "^14.1.1",
     "vue": "^3.3.4"
   },
   "devDependencies": {
     "@tsconfig/node18": "^18.2.2",
-    "@types/markdown-it": "^13.0.4",
     "@types/node": "^18.17.17",
     "@types/vscode-webview": "^1.57.2",
     "@vitejs/plugin-vue": "^5.2.1",

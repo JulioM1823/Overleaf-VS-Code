@@ -1,4 +1,5 @@
 export function resolveStableCommentThreadAnchorShape(lineTextLength: number, hasLineBreak: boolean) {
+    void hasLineBreak;
     if (lineTextLength > 0) {
         return {
             endCharacter: 1,
@@ -8,7 +9,7 @@ export function resolveStableCommentThreadAnchorShape(lineTextLength: number, ha
 
     return {
         endCharacter: 0,
-        useLineBreakFallback: hasLineBreak,
+        useLineBreakFallback: false,
     };
 }
 
@@ -23,12 +24,13 @@ export function shouldPinCommentThreadToStartAnchor(input: {
         return true;
     }
 
-    if (!input.isOfflineMode && input.synchronizationMode!=='offline') {
-        return false;
+    if (input.isOfflineMode
+        || input.synchronizationMode==='offline'
+        || input.synchronizationMode==='sync-recovery') {
+        return true;
     }
 
-    return input.reason.includes('thread_created_offline')
-        || input.reason.includes('comment_create_queued');
+    return false;
 }
 
 export function resolveCommentThreadDisplayRange(input: {

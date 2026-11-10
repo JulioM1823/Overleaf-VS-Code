@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 import * as vscode from 'vscode';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID as uuidv4 } from 'crypto';
 import {
     BaseAPI,
     Identity,
@@ -1061,7 +1061,7 @@ export class ProjectChatSession {
         content: string,
         reason: string,
         existingLocalMessageId?: string,
-        clientId = uuidv4(),
+        clientId: string = uuidv4(),
     ): Promise<Extract<OverleafChatSendResult, {deliveryState: 'queued', ok: true}>> {
         const localMessage = existingLocalMessageId
             ? this.messages.find((message) => message.id===existingLocalMessageId) ?? this.buildOfflineChatMessage(content, existingLocalMessageId, clientId)

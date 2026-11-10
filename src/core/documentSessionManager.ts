@@ -1,3 +1,4 @@
+import { AsyncQueue } from '../utils/asyncQueue';
 import * as vscode from 'vscode';
 import { UpdateSchema } from '../api/socketio';
 import { RemoteFileSystemProvider, VirtualFileSystem } from './remoteFileSystemProvider';
@@ -42,7 +43,10 @@ interface ManagedDocumentSession {
     origin: string,
     overleafUri: vscode.Uri,
     recoveryPromise?: Promise<void>,
+    remoteUpdateQueue?: AsyncQueue,
+    pendingRemoteUpdates?: number,
     remoteText: string,
+    remoteVersion?: number,
     status: DocumentSessionStatus,
     usesLocalReplica: boolean,
     vfs: VirtualFileSystem,
@@ -54,6 +58,7 @@ interface DocumentSessionBinding {
     localText: string,
     overleafUri: vscode.Uri,
     remoteText: string,
+    remoteVersion?: number,
     sessionKey: string,
     status: DocumentSessionStatus,
     usesLocalReplica: boolean,
@@ -89,6 +94,7 @@ function shouldSkipProjectWorkspaceRelPath(relPath: string) {
 }
 
 export class DocumentSessionManager {
+    private disposed = false;
     private initialAttachTimer?: ReturnType<typeof setTimeout>;
     private readonly diagnosticsStateRegistration = registerDiagnosticStateProvider(
         'documentSessions',
@@ -104,6 +110,15 @@ export class DocumentSessionManager {
 
     private logDiagnostic(event: string, fields: Record<string, unknown> = {}, error?: unknown) {
         logDiagnostic('DocumentSessions', event, fields, error);
+    }
+
+    private runBackground(task: Promise<unknown>) {
+        void task.catch(error => {
+            this.logDiagnostic('session.background_failed', {}, error);
+            for (const session of this.sessions.values()) {
+                if (session.localText!==session.remoteText) { this.setSessionStatus(session, 'recovery-required'); }
+            }
+        });
     }
 
     private summarizeCounts(values: string[]) {
@@ -258,8 +273,9 @@ export class DocumentSessionManager {
             localText: document.getText(),
             overleafUri,
             remoteText: sessionState.remoteText,
+            remoteVersion: sessionState.version,
             sessionKey: toSessionKey(vfs.origin.toString(), sessionState.docId),
-            status: vfs.isOfflineMode || vfs.realtimeConnectionPhase==='recovering'
+            status: sessionState.recoveryRequired ? 'recovery-required' : vfs.isOfflineMode || vfs.realtimeConnectionPhase==='recovering'
                 ? 'offline-queued'
                 : 'live',
             usesLocalReplica: documentBinding.mode==='localReplica',
@@ -282,9 +298,10 @@ export class DocumentSessionManager {
     }
 
     private async attachDocument(document: vscode.TextDocument, reason: string) {
+        if (this.disposed) { return undefined; }
         markManagedDocumentPending(document.uri);
         const binding = await this.resolveBinding(document);
-        if (!binding) {
+        if (!binding || this.disposed) {
             clearManagedDocumentUri(document.uri);
             return undefined;
         }
@@ -302,6 +319,7 @@ export class DocumentSessionManager {
                 origin: binding.vfs.origin.toString(),
                 overleafUri: binding.overleafUri,
                 remoteText: binding.remoteText,
+                remoteVersion: binding.remoteVersion,
                 status: binding.status,
                 usesLocalReplica: binding.usesLocalReplica,
                 vfs: binding.vfs,
@@ -318,11 +336,14 @@ export class DocumentSessionManager {
         session.overleafUri = binding.overleafUri;
         const shouldPreserveRecoveryBase = session.localText!==session.remoteText
             || session.status==='offline-queued'
-            || session.status==='syncing';
+            || session.status==='syncing'
+            || Boolean(session.pendingRemoteUpdates || session.recoveryPromise || session.flushPromise)
+            || (session.remoteVersion!==undefined && binding.remoteVersion!==undefined && binding.remoteVersion<session.remoteVersion);
         session.vfs = binding.vfs;
-        session.localText = binding.localText;
+        session.localText = document.getText();
         if (!shouldPreserveRecoveryBase) {
             session.remoteText = binding.remoteText;
+            session.remoteVersion = binding.remoteVersion;
         }
         session.usesLocalReplica = session.usesLocalReplica || binding.usesLocalReplica;
         if (session.status!=='recovery-required' && session.status!=='syncing') {
@@ -403,6 +424,7 @@ export class DocumentSessionManager {
     }
 
     private scheduleFlush(session: ManagedDocumentSession, reason: string) {
+        if (this.disposed) { return; }
         if (session.flushPromise) {
             if (!session.flushQueued) {
                 this.logDiagnostic('session.flush_queued_behind_active', {
@@ -424,7 +446,7 @@ export class DocumentSessionManager {
         }
         session.flushTimer = setTimeout(() => {
             session.flushTimer = undefined;
-            void this.flushSession(session, reason);
+            this.runBackground(this.flushSession(session, reason));
         }, DOCUMENT_SYNC_FLUSH_DELAY_MS);
     }
 
@@ -451,7 +473,9 @@ export class DocumentSessionManager {
             reason,
             status: session.status,
         });
-        const recoveryPromise = (async () => {
+        session.remoteUpdateQueue ??= new AsyncQueue();
+        const recoveryPromise = session.remoteUpdateQueue.run(async () => {
+            if (this.disposed) { return; }
             try {
                 await this.recoverSession(session, reason, options);
                 this.logDiagnostic('session.recovery_completed', {
@@ -469,7 +493,7 @@ export class DocumentSessionManager {
                 }, error);
                 await session.vfs.requestRealtimeRecovery('document_version_mismatch');
             }
-        })().finally(() => {
+        }).finally(() => {
             if (session.recoveryPromise===recoveryPromise) {
                 session.recoveryPromise = undefined;
             }
@@ -493,7 +517,10 @@ export class DocumentSessionManager {
         }
         session.flushPromise = (async () => {
             const localText = this.readCurrentSessionText(session);
+            const previousRemoteText = session.remoteText;
+            const previousRemoteVersion = session.remoteVersion;
             session.localText = localText;
+            if (session.pendingRemoteUpdates) { return; }
             if (session.status==='syncing') {
                 this.logDiagnostic('session.flush_skipped_syncing', {
                     docId: session.docId,
@@ -535,10 +562,16 @@ export class DocumentSessionManager {
                 switch (result.kind) {
                     case 'applied':
                     case 'noop':
-                        session.remoteText = localText;
-                        this.setSessionStatus(session, 'live');
+                        // An incoming update can finish while the acknowledged
+                        // write is persisting its checkpoint. Do not regress it.
+                        if (session.remoteText===previousRemoteText && session.remoteVersion===previousRemoteVersion) {
+                            session.remoteText = localText;
+                            session.remoteVersion = session.vfs.getTextDocumentRemoteVersion?.(session.docId) ?? session.remoteVersion;
+                            this.setSessionStatus(session, 'live');
+                        }
                         break;
                     case 'offline':
+                    case 'queued':
                         this.setSessionStatus(session, 'offline-queued');
                         break;
                     case 'recovery-required':
@@ -619,7 +652,14 @@ export class DocumentSessionManager {
                 workspaceEdit.replace(document.uri, fullRange, nextText);
             });
 
-            const applied = await vscode.workspace.applyEdit(workspaceEdit);
+            let applied: boolean;
+            try {
+                applied = await vscode.workspace.applyEdit(workspaceEdit);
+            } finally {
+                for (const document of targetDocuments) {
+                    this.consumeSuppressedDocumentChange(document.uri, nextText);
+                }
+            }
             const pendingUris = targetDocuments
                 .filter((document) => document.getText()!==nextText)
                 .map((document) => document.uri.toString());
@@ -688,6 +728,7 @@ export class DocumentSessionManager {
     }
 
     private async queueOfflineLocalReplicaChange(session: ManagedDocumentSession, reason: string) {
+        await session.vfs.persistTextDocumentDraft(session.overleafUri, session.localText, session.remoteText);
         if (!session.usesLocalReplica) {
             return;
         }
@@ -729,13 +770,20 @@ export class DocumentSessionManager {
                     origin: session.origin,
                     reason,
                 }, error);
-                remoteSession = await session.vfs.ensureTextDocumentSession(session.overleafUri);
+                throw error;
             }
         } else {
             remoteSession = await session.vfs.ensureTextDocumentSession(session.overleafUri);
         }
+        if (remoteSession.recoveryRequired) {
+            this.setSessionStatus(session, 'recovery-required');
+            return;
+        }
         const latestRemoteText = remoteSession.remoteText;
         const previousRemoteText = session.remoteText;
+        if (session.remoteVersion!==undefined && remoteSession.version<session.remoteVersion) {
+            throw new Error('Recovery checkpoint is older than the current document revision');
+        }
         for (let attempt = 0; attempt < 3; attempt += 1) {
             const currentLocalText = this.readCurrentSessionText(session);
             const currentLocalVersion = session.localVersion;
@@ -760,6 +808,7 @@ export class DocumentSessionManager {
                     return;
                 }
                 session.remoteText = latestRemoteText;
+                session.remoteVersion = remoteSession.version;
                 session.localText = latestRemoteText;
                 session.vfs.acceptRemoteTextUpdate(
                     session.docId,
@@ -798,6 +847,7 @@ export class DocumentSessionManager {
                         return;
                     }
                     session.remoteText = latestRemoteText;
+                    session.remoteVersion = remoteSession.version;
                     session.localText = latestRemoteText;
                     session.vfs.acceptRemoteTextUpdate(
                         session.docId,
@@ -815,6 +865,7 @@ export class DocumentSessionManager {
                     });
                     return;
                 }
+                session.remoteVersion = remoteSession.version;
                 this.setSessionStatus(session, session.vfs.isOfflineMode ? 'offline-queued' : 'live');
                 this.logDiagnostic('session.recovered_local_only', {
                     docId: session.docId,
@@ -872,6 +923,7 @@ export class DocumentSessionManager {
             }
 
             session.remoteText = latestRemoteText;
+            session.remoteVersion = remoteSession.version;
             session.localText = merged.mergedText;
             session.vfs.acceptRemoteTextUpdate(
                 session.docId,
@@ -909,9 +961,29 @@ export class DocumentSessionManager {
             reason,
             version: remoteSession.version,
         });
+        await this.handleRemoteApplyFailure(session, {
+            baseText:previousRemoteText, localText:this.readCurrentSessionText(session),
+            remoteText:latestRemoteText, version:remoteSession.version,
+            reason:'document_recovery_stale_local_retry_exhausted',
+        });
     }
 
-    private async handleRemoteTextUpdate(arg: {
+    private async handleRemoteTextUpdate(arg: Parameters<DocumentSessionManager['applyRemoteTextUpdate']>[0]) {
+        const session = this.sessions.get(toSessionKey(arg.origin, arg.docId));
+        if (!session) { return; }
+        session.remoteUpdateQueue ??= new AsyncQueue();
+        session.pendingRemoteUpdates = (session.pendingRemoteUpdates ?? 0) + 1;
+        try {
+            await session.remoteUpdateQueue.run(() => this.applyRemoteTextUpdate(arg));
+        } finally {
+            session.pendingRemoteUpdates!--;
+            if (session.pendingRemoteUpdates===0 && session.localText!==session.remoteText && session.status==='live') {
+                this.scheduleFlush(session, 'remote_update_queue_drained');
+            }
+        }
+    }
+
+    private async applyRemoteTextUpdate(arg: {
         docId: string,
         nextRemoteText: string,
         origin: string,
@@ -920,7 +992,19 @@ export class DocumentSessionManager {
         update: UpdateSchema,
     }) {
         const session = this.sessions.get(toSessionKey(arg.origin, arg.docId));
-        if (!session) {
+        if (!session || this.disposed) {
+            return;
+        }
+        const textOps = arg.update.op?.filter((op) => typeof op.i === 'string' || typeof op.d === 'string');
+        if (!textOps || textOps.length===0 || session.status==='recovery-required') { return; }
+        const nextRemoteVersion = (arg.update.v ?? 0) + 1;
+        if (session.remoteVersion!==undefined && nextRemoteVersion<=session.remoteVersion) { return; }
+        if (session.remoteVersion!==undefined && session.remoteText!==arg.previousRemoteText && !session.flushPromise) {
+            await this.handleRemoteApplyFailure(session, {
+                baseText:session.remoteText, localText:this.readCurrentSessionText(session),
+                remoteText:arg.nextRemoteText, version:nextRemoteVersion,
+                reason:'document_remote_update_base_mismatch',
+            });
             return;
         }
         const steadyStateStatus = session.status==='syncing'
@@ -928,10 +1012,6 @@ export class DocumentSessionManager {
             : session.vfs.isOfflineMode
                 ? 'offline-queued'
                 : 'live';
-        const textOps = arg.update.op?.filter((op) => typeof op.i === 'string' || typeof op.d === 'string');
-        if (!textOps || textOps.length===0) {
-            return;
-        }
         for (let attempt = 0; attempt < 3; attempt += 1) {
             const currentLocalText = this.readCurrentSessionText(session);
             const currentLocalVersion = session.localVersion;
@@ -945,6 +1025,7 @@ export class DocumentSessionManager {
                     'document_remote_text_noop',
                 );
                 session.remoteText = arg.nextRemoteText;
+                session.remoteVersion = nextRemoteVersion;
                 this.setSessionStatus(session, steadyStateStatus);
                 this.logDiagnostic('session.remote_update_noop', {
                     docId: session.docId,
@@ -1000,6 +1081,7 @@ export class DocumentSessionManager {
             }
 
             session.remoteText = arg.nextRemoteText;
+            session.remoteVersion = nextRemoteVersion;
             session.localText = merged.mergedText;
             session.vfs.acceptRemoteTextUpdate(
                 session.docId,
@@ -1024,6 +1106,11 @@ export class DocumentSessionManager {
             docId: session.docId,
             origin: session.origin,
             version: arg.update.v ?? -1,
+        });
+        await this.handleRemoteApplyFailure(session, {
+            baseText:arg.previousRemoteText, localText:this.readCurrentSessionText(session),
+            remoteText:arg.nextRemoteText, version:nextRemoteVersion,
+            reason:'document_remote_update_stale_local_retry_exhausted',
         });
     }
 
@@ -1055,6 +1142,10 @@ export class DocumentSessionManager {
         nextLocalText: string,
     ) {
         const previousLocalText = session.localText;
+        // Publish the editor version before any asynchronous comment work. A
+        // slower earlier event must not overwrite a later keystroke's state.
+        session.localText = nextLocalText;
+        session.localVersion += 1;
         if (session.usesLocalReplica && previousLocalText!==nextLocalText) {
             await session.vfs.applyLocalTextDocumentChangesToCommentRanges(
                 session.overleafUri,
@@ -1063,8 +1154,6 @@ export class DocumentSessionManager {
                 'document_changed_local_replica_comment_ranges',
             );
         }
-        session.localText = nextLocalText;
-        session.localVersion += 1;
         if (session.status==='syncing') {
             this.logDiagnostic('session.local_change_buffered_during_sync', {
                 docId: session.docId,
@@ -1155,6 +1244,10 @@ export class DocumentSessionManager {
     private async drainSessionForRemoteOperation(session: ManagedDocumentSession, reason: string) {
         for (let attempt = 0; attempt < 6; attempt += 1) {
             session.vfs = await this.vfsm.prefetch(session.overleafUri);
+            if (session.pendingRemoteUpdates) {
+                await session.remoteUpdateQueue?.idle();
+                continue;
+            }
             if (session.recoveryPromise) {
                 await session.recoveryPromise;
                 continue;
@@ -1190,6 +1283,17 @@ export class DocumentSessionManager {
         }
     }
 
+    public async persistOpenDrafts() {
+        const writes = [...this.sessions.values()].map(async session => {
+            if (session.flushTimer) { clearTimeout(session.flushTimer); session.flushTimer = undefined; }
+            const localText = this.readCurrentSessionText(session);
+            await session.vfs.persistTextDocumentDraft(session.overleafUri, localText, session.remoteText);
+        });
+        const results = await Promise.allSettled(writes);
+        const failures = results.filter((result): result is PromiseRejectedResult => result.status==='rejected');
+        if (failures.length) { throw failures[0].reason; }
+    }
+
     public async prepareProjectForRemoteOperation(projectUri: vscode.Uri, reason: string): Promise<RemoteOperationPreparationResult> {
         const projectVfs = await this.vfsm.prefetch(projectUri);
         const origin = projectVfs.origin.toString();
@@ -1210,11 +1314,13 @@ export class DocumentSessionManager {
         for (const session of candidateSessions) {
             session.vfs = await this.vfsm.prefetch(session.overleafUri);
             if (session.recoveryPromise
+                || session.pendingRemoteUpdates
                 || session.flushPromise
                 || session.flushTimer
                 || session.status==='syncing'
                 || session.status==='offline-queued'
                 || session.status==='recovery-required'
+                || session.localText!==session.remoteText
                 || session.vfs.isOfflineMode
                 || session.vfs.realtimeConnectionPhase==='initializing'
                 || session.vfs.realtimeConnectionPhase==='recovering') {
@@ -1267,14 +1373,14 @@ export class DocumentSessionManager {
                 if (event.contentChanges.length===0) {
                     return;
                 }
-                void this.handleDocumentChanged(event.document);
+                this.runBackground(this.handleDocumentChanged(event.document));
             }),
             EventBus.on('documentRemoteTextUpdatedEvent', (arg) => {
-                void this.handleRemoteTextUpdate(arg);
+                this.runBackground(this.handleRemoteTextUpdate(arg));
             }),
             EventBus.on('realtimeConnectionStateChangedEvent', (arg) => {
                 if (arg.phase==='live' || arg.phase==='invisible') {
-                    void this.resynchronizeProjectSessions(arg.origin, `realtime_phase_${arg.phase}`);
+                    this.runBackground(this.resynchronizeProjectSessions(arg.origin, `realtime_phase_${arg.phase}`));
                     return;
                 }
                 if (arg.phase==='recovering') {
@@ -1287,7 +1393,7 @@ export class DocumentSessionManager {
             }),
             EventBus.on('offlineSynchronizationStateChangedEvent', (arg) => {
                 if (arg.mode==='online' || arg.mode==='sync-recovery') {
-                    void this.resynchronizeProjectSessions(arg.origin, `offline_mode_${arg.mode}`);
+                    this.runBackground(this.resynchronizeProjectSessions(arg.origin, `offline_mode_${arg.mode}`));
                     return;
                 }
                 for (const session of this.sessions.values()) {
@@ -1297,6 +1403,12 @@ export class DocumentSessionManager {
                 }
             }),
             new vscode.Disposable(() => {
+                this.disposed = true;
+                for (const session of this.sessions.values()) {
+                    if (session.flushTimer) { clearTimeout(session.flushTimer); session.flushTimer = undefined; }
+                    clearManagedDocumentSession(session.key);
+                }
+                this.suppressedDocumentChanges.clear();
                 if (this.initialAttachTimer) {
                     clearTimeout(this.initialAttachTimer);
                     this.initialAttachTimer = undefined;

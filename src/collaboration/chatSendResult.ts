@@ -94,28 +94,13 @@ export function formatOverleafChatSendFailureMessage(
         case 'rate-limited':
             return `${translator('Unable to send the Overleaf chat message because Overleaf is rate limiting requests. Try again in a moment.')}${statusSuffix}`;
         case 'validation-failed':
-            return appendResponsePreview(
-                `${translator('Unable to send the Overleaf chat message because Overleaf rejected the message payload.')}${statusSuffix}`,
-                options.responsePreview,
-                translator,
-            );
+            return `${translator('Unable to send the Overleaf chat message because Overleaf rejected the message payload.')}${statusSuffix}`;
         case 'connectivity-failure':
             return translator('Unable to send the Overleaf chat message because the network connection to Overleaf was interrupted.');
         case 'server-error':
         default:
-            return appendResponsePreview(
-                `${translator('Unable to send the Overleaf chat message due to an Overleaf server error.')}${statusSuffix}`,
-                options.responsePreview,
-                translator,
-            );
+            return `${translator('Unable to send the Overleaf chat message due to an Overleaf server error.')}${statusSuffix}`;
     }
-}
-
-function appendResponsePreview(message: string, responsePreview: string | undefined, translator: Translator) {
-    if (!responsePreview) {
-        return message;
-    }
-    return `${message} ${translator('Server response')}: ${responsePreview}`;
 }
 
 export function buildOverleafChatSendFailure(input: {

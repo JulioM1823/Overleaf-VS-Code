@@ -167,6 +167,10 @@ Module._load = function patchedLoad(request, parent, isMain) {
     }
     if (request==='./compileArtifacts' && parent?.id?.endsWith('/compileManager.js')) {
         return {
+            isCompileLogArtifact: (value) => {
+                const path = String(value?.path || value?.name || '').replace(/^\.?\//, '').toLowerCase();
+                return path === 'output.log' || path.endsWith('/output.log');
+            },
             normalizeCompileArtifactPath: (value) => value,
             normalizeSyncResultFilePath: (value) => value,
         };
@@ -307,6 +311,20 @@ test('compile waits for session preflight before invoking remote compile', async
         'update:compiling',
         'compile',
     ]);
+});
+
+test('manual remote compile flushes document sessions without saving unrelated workspace buffers', async () => {
+    const uri=createUri('overleaf-workshop://server/project/main.tex'),steps=[];
+    const manager=new CompileManager({prefetch:async()=>({
+        _resolveUri:async()=>({fileId:'doc-1'}),getRootDocName:()=>'/main.tex',
+        compile:async()=>{steps.push('compile');return false;},openFile:async()=>Buffer.from(''),
+    })},{prepareProjectForRemoteOperation:async()=>{steps.push('flush document sessions');return 'ready';}});
+    const originalCheck=CompileManager.check;
+    CompileManager.check=async()=>uri;manager.update=async()=>uri;
+    try {await manager.compile(true,{source:'command',targetUri:uri});}
+    finally {CompileManager.check=originalCheck;}
+    assert.equal(saveAllCount,0);
+    assert.deepEqual(steps,['flush document sessions','compile']);
 });
 
 test('save-triggered compile queues while another compile is running', async () => {
@@ -567,6 +585,91 @@ test('compile success does not become unavailable when diagnostics check fails',
     }
 
     assert.deepEqual(updateCalls, ['compiling', 'success']);
+});
+
+test('failed remote compile with output.log still runs diagnostics and stays failed', async () => {
+    const uri = createUri('overleaf-workshop://server/project/main.tex');
+    const updateCalls = [];
+    const manager = new CompileManager({
+        prefetch: async () => ({
+            _resolveUri: async () => ({fileId: 'doc-1'}),
+            compile: async () => false,
+            getCompileOutputs: () => [{path: 'output.log', type: 'log'}],
+            getRootDocName: () => '/main.tex',
+            openFile: async () => Buffer.from('\\documentclass{article}\n'),
+            realtimeConnectionPhase: 'live',
+        }),
+    }, {
+        prepareProjectForRemoteOperation: async () => 'ready',
+    });
+    const originalCheck = CompileManager.check;
+    const originalExecuteCommand = vscodeMock.commands.executeCommand;
+    CompileManager.check = async () => uri;
+    vscodeMock.commands.executeCommand = async (command, ...args) => {
+        executedCommands.push({args, command});
+        if (command==='overleaf-workshop.compileManager.compileErrorCheck') {
+            return true;
+        }
+        return false;
+    };
+    manager.update = async (status) => {
+        updateCalls.push(status);
+        return uri;
+    };
+
+    try {
+        await manager.compile(true);
+    } finally {
+        CompileManager.check = originalCheck;
+        vscodeMock.commands.executeCommand = originalExecuteCommand;
+    }
+
+    assert.deepEqual(updateCalls, ['compiling', 'failed']);
+    assert.deepEqual(executedCommands.map(({command}) => command), [
+        'overleaf-workshop.compileManager.compileErrorCheck',
+    ]);
+    assert.deepEqual(errorMessages, []);
+});
+
+test('failed remote compile without output.log shows actionable command failure', async () => {
+    const uri = createUri('overleaf-workshop://server/project/main.tex');
+    const updateCalls = [];
+    const manager = new CompileManager({
+        prefetch: async () => ({
+            _resolveUri: async () => ({fileId: 'doc-1'}),
+            compile: async () => false,
+            getCompileOutputs: () => [],
+            getRootDocName: () => '/main.tex',
+            openFile: async () => Buffer.from('\\documentclass{article}\n'),
+            realtimeConnectionPhase: 'live',
+        }),
+    }, {
+        prepareProjectForRemoteOperation: async () => 'ready',
+    });
+    const originalCheck = CompileManager.check;
+    const originalExecuteCommand = vscodeMock.commands.executeCommand;
+    CompileManager.check = async () => uri;
+    vscodeMock.commands.executeCommand = async (command, ...args) => {
+        executedCommands.push({args, command});
+        return false;
+    };
+    manager.update = async (status) => {
+        updateCalls.push(status);
+        return uri;
+    };
+
+    try {
+        await manager.compile(true);
+    } finally {
+        CompileManager.check = originalCheck;
+        vscodeMock.commands.executeCommand = originalExecuteCommand;
+    }
+
+    assert.deepEqual(updateCalls, ['compiling', 'failed']);
+    assert.deepEqual(executedCommands, []);
+    assert.deepEqual(errorMessages, [
+        'Overleaf compilation failed without returning output.log. Open the Overleaf-VS Code diagnostics output for compile response details.',
+    ]);
 });
 
 test('offline command compile falls back to a local LaTeX Workshop build in a local replica', async () => {

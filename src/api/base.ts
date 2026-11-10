@@ -3,8 +3,9 @@ import * as http from 'http';
 import * as https from 'https';
 import * as stream from 'stream';
 import FormData = require('form-data');
-import { v4 as uuidv4 } from 'uuid';
-import fetch, { Response } from 'node-fetch';
+import { randomUUID as uuidv4 } from 'crypto';
+import { Response } from 'node-fetch';
+import { fetchWithLimits as fetch } from './httpTransport';
 import { FileEntity, FileType, FolderEntity, OutputFileEntity } from '../core/remoteFileSystemProvider';
 import { logDiagnostic } from '../utils/diagnostics';
 import { buildPasswordLoginUnavailableMessage } from '../utils/authFlow';
@@ -36,7 +37,7 @@ export interface Identity {
 export interface RealtimeHandshakeProbe {
     cookies: string,
     metadata?: RealtimeHandshakeMetadata,
-    setCookieHeaders: string[],
+    setCookieCount: number,
     status: number,
     url: string,
 }
@@ -48,18 +49,24 @@ export interface NewProjectResponseSchema {
 }
 
 export interface CompileResponseSchema {
-    status: 'success' | 'failure' | 'error';
-    compileGroup: string;
-    outputFiles: Array<OutputFileEntity>;
-    stats: {
+    status?: string;
+    compileGroup?: string;
+    outputFiles?: Array<OutputFileEntity>;
+    stats?: {
         "latexmk-errors":number, "pdf-size":number,
         "latex-runs":number, "latex-runs-with-errors":number,
         "latex-runs-0":number, "latex-runs-with-error-0s":number,
     };
-    timings: {
+    timings?: {
         "sync":number, "compile":number, "output":number, "compileE2E":number,
     };
-    enableHybridPdfDownload: boolean;
+    enableHybridPdfDownload?: boolean;
+    buildId?: string;
+    clsiServerId?: string;
+    errors?: unknown[];
+    logs?: unknown;
+    validationProblems?: unknown[];
+    [key: string]: unknown;
 }
 
 export interface SyncPdfResponseSchema {
@@ -334,6 +341,23 @@ function safeParseJson<T>(body: string): T | undefined {
     }
 }
 
+function asObject(value: unknown): Record<string, unknown> | undefined {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : undefined;
+}
+
+export function normalizeCompileResponsePayload(payload: unknown): CompileResponseSchema {
+    const response = asObject(payload) ?? {};
+    const compile = asObject(response.compile) ?? response;
+    return {
+        ...compile,
+        outputFiles: Array.isArray(compile.outputFiles)
+            ? compile.outputFiles as OutputFileEntity[]
+            : [],
+    } as CompileResponseSchema;
+}
+
 function extractPasswordLoginErrorMessage(payload?: PasswordLoginResponsePayload) {
     if (!payload?.message) {
         return undefined;
@@ -370,10 +394,33 @@ export function extractAuthenticatedUserContext(body: string): AuthenticatedUser
     return { userId, userEmail, csrfToken };
 }
 
-function normalizeBaseApiUrl(url: string): string {
+function isLoopbackHostname(hostname: string) {
+    const normalized = hostname.toLowerCase();
+    if (normalized==='localhost' || normalized==='[::1]' || normalized==='::1') {
+        return true;
+    }
+
+    const ipv4Match = normalized.match(/^127(?:\.(\d{1,3})){3}$/);
+    if (!ipv4Match) {
+        return false;
+    }
+
+    return normalized.split('.').every(segment => {
+        const octet = Number(segment);
+        return Number.isInteger(octet) && octet >= 0 && octet <= 255;
+    });
+}
+
+export function normalizeBaseApiUrl(url: string): string {
     const parsed = new URL(url);
+    if (parsed.username || parsed.password) {
+        throw new Error('Overleaf server URL must not contain embedded credentials.');
+    }
     if (parsed.protocol!=='http:' && parsed.protocol!=='https:') {
         throw new Error('Overleaf server URL must use http or https.');
+    }
+    if (parsed.protocol==='http:' && !isLoopbackHostname(parsed.hostname)) {
+        throw new Error('Overleaf server URL must use HTTPS unless it targets localhost.');
     }
     parsed.hash = '';
     parsed.search = '';
@@ -388,7 +435,7 @@ function buildHttpFailureMessage(status: string | number): string {
 }
 
 export class BaseAPI {
-    private url: string;
+    public readonly url: string;
     private readonly origin: string;
     private agent: http.Agent | https.Agent;
     private identity?: Identity;
@@ -409,7 +456,7 @@ export class BaseAPI {
 
     private resolveSameOriginUrl(route: string): string {
         const resolved = new URL(route, this.url);
-        if (resolved.origin!==this.origin) {
+        if (resolved.origin!==this.origin || resolved.username || resolved.password) {
             throw new Error('Refusing to send Overleaf credentials to a different origin.');
         }
         return resolved.toString();
@@ -636,7 +683,7 @@ export class BaseAPI {
         return {
             cookies,
             metadata,
-            setCookieHeaders,
+            setCookieCount: setCookieHeaders.length,
             status: res.status,
             url,
         };
@@ -758,6 +805,11 @@ export class BaseAPI {
         }
 
         const socketBootstrapUrl = socketScriptUrl ?? new URL('socket.io/socket.io.js', this.url).toString();
+        const parsedBootstrapUrl = new URL(socketBootstrapUrl);
+        if (parsedBootstrapUrl.username || parsedBootstrapUrl.password
+            || (parsedBootstrapUrl.protocol!=='https:' && !this.isSameOriginUrl(socketBootstrapUrl))) {
+            throw new Error('Refusing an insecure or credential-bearing socket bootstrap URL');
+        }
         const sameOriginSocketBootstrap = this.isSameOriginUrl(socketBootstrapUrl);
         if (!sameOriginSocketBootstrap) {
             this.debugLog('auth.socket_bootstrap_cross_origin_credentials_suppressed', {
@@ -767,7 +819,7 @@ export class BaseAPI {
         const res = await fetch(socketBootstrapUrl, {
             method: 'GET',
             redirect: 'manual',
-            agent: this.agent,
+            agent: sameOriginSocketBootstrap ? this.agent : undefined,
             headers: {
                 'Connection': 'keep-alive',
                 ...(sameOriginSocketBootstrap ? {'Cookie': identity.cookies} : {}),
@@ -779,6 +831,9 @@ export class BaseAPI {
                 res.headers.raw()['set-cookie'] ?? [],
             );
         }
+        // Only response headers are used; do not leave the script body/socket
+        // alive until the transport timeout on every credential refresh.
+        (res.body as stream.Readable).destroy();
         return identity;
     };
 
@@ -822,7 +877,7 @@ export class BaseAPI {
                 });
                 break;
             case 'PUT':
-                break;
+                throw new Error('PUT requests are not implemented');
             case 'DELETE':
                 res = await fetch(requestUrl, {
                     method: 'DELETE', redirect: 'manual', agent: this.agent,
@@ -884,54 +939,63 @@ export class BaseAPI {
     protected async download(route:string) {
         if (this.identity===undefined) { return Promise.reject(); }
 
-        let content: Buffer[] = [];
-        let chunkCount = 0;
-        while(true) {
-            const res = await fetch(this.url+route, {
-                method: 'GET', redirect: 'manual', agent: this.agent,
+        const requestUrl = this.resolveSameOriginUrl(route);
+        const chunks: Buffer[] = [];
+        let offset = 0;
+        let total: number | undefined;
+        const maxBytes = 512 * 1024 * 1024;
+        while (true) {
+            const res = await fetch(requestUrl, {
+                method: 'GET', redirect: 'manual', agent: this.agent, size: maxBytes,
                 headers: {
-                    'Connection': 'keep-alive',
-                    'Cookie': this.identity.cookies,
-                }
+                    Cookie: this.identity.cookies,
+                    ...(offset > 0 ? {Range: `bytes=${offset}-`} : {}),
+                },
             });
-            this.debugLog('download.response', {
-                route,
-                status: res.status,
-            });
-            if (res.status===200) {
-                content.push(await res.buffer());
-                chunkCount += 1;
-                break;
+            if (res.status!==200 && res.status!==206) {
+                (res.body as stream.Readable).destroy();
+                throw new Error(`Download failed (HTTP ${res.status})`);
             }
-            else if (res.status===206) {
-                content.push(await res.buffer());
-                chunkCount += 1;
-            } else {
-                break;
+            if (res.status===200 && offset!==0) {
+                (res.body as stream.Readable).destroy();
+                throw new Error('Server ignored the partial-download range');
             }
-        };
-
-        const mergedContent = Buffer.concat(
-            content.map((chunk) => new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength))
-        );
-        this.debugLog('download.completed', {
-            bytes: mergedContent.length,
-            chunkCount,
-            route,
-        });
-        return mergedContent;
+            const range = res.status===206 ? /^bytes (\d+)-(\d+)\/(\d+)$/.exec(res.headers.get('content-range') ?? '') : null;
+            if (res.status===206 && (!range || Number(range[1])!==offset || Number(range[2]) < offset
+                || Number(range[3]) > maxBytes || Number(range[2]) >= Number(range[3])
+                || (total!==undefined && total!==Number(range[3])))) {
+                (res.body as stream.Readable).destroy();
+                throw new Error('Invalid or non-progressing partial-download range');
+            }
+            const bytes = await res.buffer();
+            if (range && bytes.length!==Number(range[2]) - offset + 1) {
+                throw new Error('Partial download length does not match its range');
+            }
+            offset += bytes.length;
+            if (offset > maxBytes) { throw new Error('Download exceeds the size limit'); }
+            chunks.push(bytes);
+            if (res.status===200) { break; }
+            total = Number(range![3]);
+            if (offset===total) { break; }
+        }
+        return Buffer.concat(chunks, offset);
     }
 
     protected async downloadWithRedirects(route:string, maxRedirects=5) {
         if (this.identity===undefined) { return Promise.reject(); }
 
-        let target = new URL(route, this.url).toString();
+        let target = this.resolveSameOriginUrl(route);
         for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount += 1) {
-            const sameOrigin = new URL(target).origin === new URL(this.url).origin;
+            const parsedTarget = new URL(target);
+            if (parsedTarget.username || parsedTarget.password
+                || (parsedTarget.protocol!=='https:' && !(parsedTarget.protocol==='http:' && this.isSameOriginUrl(target)))) {
+                throw new Error('Refusing an insecure or unsupported download redirect');
+            }
+            const sameOrigin = this.isSameOriginUrl(target);
             const res = await fetch(target, {
                 method: 'GET',
                 redirect: 'manual',
-                agent: this.agent,
+                agent: sameOrigin ? this.agent : undefined,
                 headers: {
                     'Connection': 'keep-alive',
                     ...(sameOrigin ? {'Cookie': this.identity.cookies} : {}),
@@ -945,7 +1009,7 @@ export class BaseAPI {
                 target,
             });
 
-            if (res.status===200 || res.status===206) {
+            if (res.status===200) {
                 const content = await res.buffer();
                 this.debugLog('download_with_redirects.completed', {
                     bytes: content.length,
@@ -959,6 +1023,7 @@ export class BaseAPI {
 
             if ([301, 302, 303, 307, 308].includes(res.status)) {
                 const location = res.headers.get('location');
+                (res.body as stream.Readable).destroy();
                 if (!location) {
                     this.debugLog('download_with_redirects.redirect_missing_location', {
                         redirectCount,
@@ -972,6 +1037,7 @@ export class BaseAPI {
                 continue;
             }
 
+            (res.body as stream.Readable).destroy();
             break;
         }
 
@@ -980,7 +1046,7 @@ export class BaseAPI {
             route,
             target,
         });
-        return Buffer.alloc(0);
+        throw new Error('Project download failed or exceeded its redirect limit');
     }
 
     async logout(identity:Identity): Promise<ResponseSchema> {
@@ -1083,17 +1149,22 @@ export class BaseAPI {
     }
 
     async uploadFile(identity:Identity, projectId:string, parentFolderId:string, filename:string, fileContent:Uint8Array) {
-        const fileStream = stream.Readable.from(fileContent);
+        const fileStream = stream.Readable.from([fileContent]);
         const formData = new FormData();
         const mimeType = require('mime-types').lookup(filename);
         formData.append('targetFolderId', parentFolderId);
         formData.append('name', filename);
         formData.append('type', mimeType? mimeType : 'text/plain');
-        formData.append('qqfile', fileStream, {filename});
+        formData.append('qqfile', fileStream, {filename, knownLength: fileContent.byteLength});
 
         this.setIdentity(identity);
-        return this.request('POST', `project/${projectId}/upload?folder_id=${parentFolderId}`, formData, (res) => {
+        const query = new URLSearchParams({folder_id: parentFolderId}).toString();
+        return this.request('POST', `project/${projectId}/upload?${query}`, formData, (res) => {
             const {success, entity_id, entity_type} = JSON.parse(res!) as any;
+            if (success!==true || typeof entity_id!=='string' || !/^[a-f\d]{24}$/i.test(entity_id)
+                || (entity_type!=='doc' && entity_type!=='file')) {
+                throw new Error('Overleaf did not confirm the uploaded file');
+            }
             const entity = {_type:entity_type, _id:entity_id, name:filename} as FileEntity;
             return {entity};
         }, {'X-Csrf-Token': identity.csrfToken});
@@ -1101,12 +1172,18 @@ export class BaseAPI {
 
     async uploadProject(identity:Identity, filename:string, fileContent:Uint8Array) {
         const uuid = uuidv4();
-        const fileStream = stream.Readable.from(fileContent);
+        const fileStream = stream.Readable.from([fileContent]);
         const formData = new FormData();
-        formData.append('qqfile', fileStream, {filename});
+        formData.append('qqfile', fileStream, {filename, knownLength: fileContent.byteLength});
 
         this.setIdentity(identity);
-        return this.request('POST', `project/new/upload?_csrf=${identity.csrfToken}&qquuid=${uuid}&qqfilename=${filename}&qqtotalfilesize=${fileContent.length}`, formData, (res) => {
+        const query = new URLSearchParams({
+            _csrf: identity.csrfToken,
+            qquuid: uuid,
+            qqfilename: filename,
+            qqtotalfilesize: String(fileContent.length),
+        }).toString();
+        return this.request('POST', `project/new/upload?${query}`, formData, (res) => {
             const message = (JSON.parse(res!) as NewProjectResponseSchema).project_id;
             return {message};
         });
@@ -1157,7 +1234,23 @@ export class BaseAPI {
 
         this.setIdentity(identity);
         return this.request('POST', `project/${projectId}/compile?auto_compile=true`, body, (res) => {
-            const compile = JSON.parse(res!) as CompileResponseSchema;
+            const compile = normalizeCompileResponsePayload(JSON.parse(res!));
+            // Output URLs do not include the compiler routing parameters.
+            // Without them, web may route the download to a different CLSI
+            // worker, where this build does not exist (HTTP 404).
+            compile.outputFiles = compile.outputFiles?.map(file => {
+                const url = new URL(this.resolveSameOriginUrl(file.url));
+                if (typeof compile.compileGroup==='string') {
+                    url.searchParams.set('compileGroup', compile.compileGroup);
+                }
+                const serverId = compile.fromCache===true
+                    ? (typeof compile.clsiCacheShard==='string' ? compile.clsiCacheShard : 'cache')
+                    : compile.clsiServerId;
+                if (typeof serverId==='string') {
+                    url.searchParams.set('clsiserverid', serverId);
+                }
+                return {...file, url: url.toString()};
+            });
             return {compile};
         }, {'X-Csrf-Token': identity.csrfToken});
     }
@@ -1257,7 +1350,7 @@ export class BaseAPI {
             return Promise.reject();
         }
 
-        const res = await fetch(this.url+route, {
+        const res = await fetch(this.resolveSameOriginUrl(route), {
             method: 'GET', redirect: 'manual', agent: this.agent,
             headers: {
                 'Connection': 'keep-alive',
@@ -1269,14 +1362,17 @@ export class BaseAPI {
             return await res.text();
         }
 
-        throw new Error(`${res.status}: ${await res.text()}`);
+        await res.text();
+        throw new Error(buildHttpFailureMessage(res.status));
     }
 
     async getFileFromClsi(identity:Identity, url:string, compileGroup:string) {
-        url = url.replace(/^\/+/g, '');
-
         this.setIdentity(identity);
-        const content = await this.download(url);
+        const target = new URL(this.resolveSameOriginUrl(url));
+        if (!target.searchParams.has('compileGroup')) {
+            target.searchParams.set('compileGroup', compileGroup);
+        }
+        const content = await this.download(target.toString());
         return {
             type: 'success',
             content: new Uint8Array( content )
@@ -1285,8 +1381,14 @@ export class BaseAPI {
 
     async proxySyncPdf(identity:Identity, projectId:string, page:number, h:number, v:number, buildId:string) {
         this.setIdentity(identity);
-        const request = `project/${projectId}/sync/pdf?page=${page}&h=${h.toFixed(2)}&v=${v.toFixed(2)}&editorId=${uuidv4()}&buildId=${buildId}`;
-        return this.request('GET', `project/${projectId}/sync/pdf?page=${page}&h=${h.toFixed(2)}&v=${v.toFixed(2)}&editorId=${uuidv4()}&buildId=${buildId}`,
+        const query = new URLSearchParams({
+            page: String(page),
+            h: h.toFixed(2),
+            v: v.toFixed(2),
+            editorId: uuidv4(),
+            buildId,
+        }).toString();
+        return this.request('GET', `project/${projectId}/sync/pdf?${query}`,
                             undefined, (res) => {
                                 const syncPdf = (JSON.parse(res!) as any).code[0] as SyncPdfResponseSchema;
                                 return {syncPdf};
@@ -1295,7 +1397,14 @@ export class BaseAPI {
 
     async proxySyncCode(identity:Identity, projectId:string, file:string, line:number, column:number, buildId:string) {
         this.setIdentity(identity);
-        return this.request('GET', `project/${projectId}/sync/code?file=${file}&line=${line}&column=${column}&editorId=${uuidv4()}&buildId=${buildId}`,
+        const query = new URLSearchParams({
+            file,
+            line: String(line),
+            column: String(column),
+            editorId: uuidv4(),
+            buildId,
+        }).toString();
+        return this.request('GET', `project/${projectId}/sync/code?${query}`,
                             undefined, (res) => {
                                 const syncCode = (JSON.parse(res!) as any).pdf as SyncCodeResponseSchema;
                                 return {syncCode};
@@ -1467,7 +1576,7 @@ export class BaseAPI {
             projectId,
             route,
         });
-        const res = await fetch(this.url + route, {
+        const res = await fetch(this.resolveSameOriginUrl(route), {
             method: 'POST',
             redirect: 'manual',
             agent: this.agent,
@@ -1495,7 +1604,7 @@ export class BaseAPI {
                 route,
                 statusCode: res.status,
                 responseBody,
-                message: `${res.status}: ${responseBody}`,
+                message: buildHttpFailureMessage(res.status),
             };
         if (response.type==='success') {
             this.debugLog('chat.message_send_completed', {
