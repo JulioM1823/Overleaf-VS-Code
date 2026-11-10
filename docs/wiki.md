@@ -55,7 +55,9 @@ There are currently two ways to login to the server: login with email and passwo
 If you can login via email and password on the web browser, you can also login via email and password in VS Code. The exception is that Captcha is enabled on the server, then you have to [login with cookies](#login-with-cookies) instead.
 
 #### Login with Cookies
-As for the cases that Captcha is enabled on the server, or you want to login with SSO, you have to login with cookies from an already logged-in browser. The steps are as follows:
+As for the cases that Captcha is enabled on the server, or you want to login with SSO, you have to login with cookies from an already logged-in browser.
+
+Use **Google Chrome** to sign in to Overleaf and retrieve the cookie value for this method. **Safari and Firefox have not yet been tested**. The steps are as follows:
 
 ![screenshot-login-with-cookies](assets/login_with_cookie.png)
 
