@@ -47,10 +47,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/overleaf-workshop/overleaf-workshop"
+    "url": "https://github.com/JulioM1823/Overleaf-VS-Code"
   },
   "bugs": {
-    "url": "https://github.com/overleaf-workshop/overleaf-workshop/issues"
+    "url": "https://github.com/JulioM1823/Overleaf-VS-Code/issues"
   },
   "engines": {
     "vscode": "^1.80.0"
