@@ -7,7 +7,7 @@ const response = (body, options) => new Response(Readable.from([Buffer.from(body
 let handler;
 const originalLoad = Module._load;
 Module._load = function(request, parent, main) {
-    if (parent?.filename.endsWith('/api/base.js') && request === './httpTransport') {
+    if (parent?.filename.replace(/\\/g, '/').endsWith('/api/base.js') && request === './httpTransport') {
         return {fetchWithLimits: (url, options) => handler(url, options)};
     }
     return originalLoad.call(this, request, parent, main);

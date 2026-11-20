@@ -21,6 +21,9 @@ type ChatWebviewMessage =
 
 const MAX_CHAT_WEBVIEW_CONTENT_LENGTH = 100_000;
 const MAX_CHAT_WEBVIEW_ID_LENGTH = 1_024;
+const MAX_PENDING_COMPOSER_MESSAGES = 128;
+const MAX_PENDING_COMPOSER_TEXT_LENGTH = 1_000_000;
+type ComposerMessage = {type: 'insert-text', content: string} | {type: 'focus-root-input'};
 
 function createWebviewNonce(): string {
     return crypto.randomBytes(16).toString('base64');
@@ -70,6 +73,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private triggerDisposables?: vscode.Disposable[];
     private webviewDisposables: vscode.Disposable[] = [];
     private webviewView?: vscode.WebviewView;
+    private disposed = false;
+    private webviewReady = false;
+    private viewSequence = 0;
+    private pendingComposerMessages: ComposerMessage[] = [];
+    private pendingComposerTextLength = 0;
+    private composerDelivery?: Promise<void>;
 
     constructor(
         private readonly vfs: VirtualFileSystem,
@@ -135,12 +144,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         };
     }
 
-    private postToWebview(message: Record<string, unknown>) {
-        if (this.webviewView === undefined) {
+    private async postToWebview(message: Record<string, unknown>): Promise<boolean> {
+        const view = this.webviewView;
+        if (this.disposed || view === undefined) { return false; }
+        try {
+            const delivered = await view.webview.postMessage(message);
+            if (!delivered) { this.logDiagnostic('webview.message_rejected', {messageType:message.type}); }
+            return delivered;
+        } catch (error) {
+            this.logDiagnostic('webview.message_failed', {messageType:message.type}, error);
             return false;
         }
-        this.webviewView.webview.postMessage(message);
-        return true;
     }
 
     private postCurrentMessages() {
@@ -176,6 +190,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     dispose() {
+        this.disposed = true;
+        this.viewSequence++;
+        this.webviewReady = false;
+        this.clearPendingComposerMessages();
         this.clearTriggerDisposables();
         this.clearWebviewDisposables();
         this.diagnosticsStateRegistration.dispose();
@@ -205,9 +223,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         _context: vscode.WebviewViewResolveContext<unknown>,
         _token: vscode.CancellationToken,
     ): Thenable<void> {
+        if (this.disposed) { return Promise.resolve(); }
+        const sequence = ++this.viewSequence;
+        if (this.webviewView && this.webviewView!==webviewView) { this.clearPendingComposerMessages(true); }
         this.clearWebviewDisposables();
+        this.webviewReady = false;
         this.webviewView = webviewView;
+        this.webviewDisposables.push(webviewView.onDidDispose(() => {
+            if (this.webviewView!==webviewView) { return; }
+            this.viewSequence++;
+            this.webviewReady = false;
+            this.clearPendingComposerMessages(true);
+            this.clearWebviewDisposables();
+            this.webviewView = undefined;
+            this.logDiagnostic('webview.disposed');
+        }));
         return this.loadWebviewHtml(webviewView.webview).then((html) => {
+            if (this.disposed || sequence!==this.viewSequence || _token?.isCancellationRequested) { return; }
             webviewView.webview.options = {
                 enableScripts: true,
                 localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'views/chat-view/dist')],
@@ -227,8 +259,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     }
                     switch (message.type) {
                         case 'chat-ready':
+                            this.webviewReady = true;
                             this.logDiagnostic('webview.ready');
                             this.postCurrentMessages();
+                            void this.flushPendingComposerMessages();
                             break;
                         case 'get-messages':
                             this.postCurrentMessages();
@@ -253,13 +287,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                         this.hasUnreadMessages = 0;
                         this.emitUnreadCountChanged('chat_view_visible');
                         this.postCurrentMessages();
-                    }
-                }),
-                webviewView.onDidDispose(() => {
-                    if (this.webviewView===webviewView) {
-                        this.logDiagnostic('webview.disposed');
-                        this.clearWebviewDisposables();
-                        this.webviewView = undefined;
                     }
                 }),
             );
@@ -349,40 +376,79 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     revealChatView() {
+        if (this.disposed) { return; }
         void vscode.commands.executeCommand('setContext', `${ROOT_NAME}.chatViewEnabled`, true)
-            .then(() => vscode.commands.executeCommand(`${ROOT_NAME}.chatWebview.focus`));
+            .then(() => {
+                if (!this.disposed) { return vscode.commands.executeCommand(`${ROOT_NAME}.chatWebview.focus`); }
+            }).then(undefined, error => this.logDiagnostic('webview.focus_failed', {}, error));
         this.hasUnreadMessages = 0;
         this.emitUnreadCountChanged('chat_view_revealed');
     }
 
-    insertText(text = '') {
-        this.revealChatView();
-        if (this.webviewView === undefined) {
-            setTimeout(() => this.insertText(text), 100);
-            return;
+    private showComposerWarning(message: string) {
+        void Promise.resolve(vscode.window.showWarningMessage(vscode.l10n.t(message)))
+            .catch(error => this.logDiagnostic('composer.warning_failed', {}, error));
+    }
+
+    private clearPendingComposerMessages(notify = false) {
+        if (notify && this.pendingComposerMessages.some(message => message.type==='insert-text')) {
+            this.showComposerWarning('Chat closed before the pending text could be inserted. Insert the text again after reopening chat.');
         }
-        this.logDiagnostic('composer.insert_requested', {
-            textLength: text.length,
+        this.pendingComposerMessages = [];
+        this.pendingComposerTextLength = 0;
+    }
+
+    private queueComposerMessage(message: ComposerMessage) {
+        if (this.disposed) { return false; }
+        if (message.type==='focus-root-input' && this.pendingComposerMessages.some(item => item.type==='focus-root-input')) {
+            this.revealChatView();
+            return true;
+        }
+        const textLength = message.type==='insert-text' ? message.content.length : 0;
+        if (this.pendingComposerMessages.length>=MAX_PENDING_COMPOSER_MESSAGES
+            || this.pendingComposerTextLength+textLength>MAX_PENDING_COMPOSER_TEXT_LENGTH) {
+            // Reject the entire request explicitly; never truncate text or
+            // evict previously accepted draft snippets to make space.
+            this.showComposerWarning('Chat is still opening. This text was not inserted because the pending text limit was reached. Open chat and try inserting it again.');
+            return false;
+        }
+        this.pendingComposerMessages.push(message);
+        this.pendingComposerTextLength += textLength;
+        this.revealChatView();
+        void this.flushPendingComposerMessages();
+        return true;
+    }
+
+    private flushPendingComposerMessages() {
+        if (this.composerDelivery || this.disposed || !this.webviewReady) { return this.composerDelivery; }
+        const sequence = this.viewSequence;
+        this.composerDelivery = (async () => {
+            while (!this.disposed && sequence===this.viewSequence && this.webviewReady && this.pendingComposerMessages.length) {
+                const message = this.pendingComposerMessages[0];
+                if (!await this.postToWebview(message)) { return; }
+                if (this.pendingComposerMessages[0]!==message) { return; }
+                this.pendingComposerMessages.shift();
+                if (message.type==='insert-text') { this.pendingComposerTextLength -= message.content.length; }
+            }
+        })().finally(() => {
+            this.composerDelivery = undefined;
+            if (sequence!==this.viewSequence && this.pendingComposerMessages.length && this.webviewReady) {
+                void this.flushPendingComposerMessages();
+            }
         });
-        this.webviewView.webview.postMessage({
-            type: 'insert-text',
-            content: text,
-        });
+        return this.composerDelivery;
+    }
+
+    insertText(text = '') {
+        return typeof text==='string' && this.queueComposerMessage({type:'insert-text', content:text});
     }
 
     focusMainComposer() {
-        this.revealChatView();
-        if (this.webviewView === undefined) {
-            setTimeout(() => this.focusMainComposer(), 100);
-            return;
-        }
-        this.logDiagnostic('composer.focus_requested');
-        this.webviewView.webview.postMessage({
-            type: 'focus-root-input',
-        });
+        return this.queueComposerMessage({type:'focus-root-input'});
     }
 
     get triggers() {
+        if (this.disposed) { return []; }
         if (this.triggerDisposables!==undefined) {
             return this.triggerDisposables;
         }

@@ -75,6 +75,7 @@ export class ClientManager {
     private readonly reviewViewer: ReviewViewProvider;
     private currentPublicId: string;
     private readonly selfUserId: string;
+    private disposed = false;
 
     constructor(
         private readonly vfs: VirtualFileSystem,
@@ -129,8 +130,10 @@ export class ClientManager {
     }
 
     private refreshConnectedUsers(reason: string) {
+        if (this.disposed) { return; }
         void this.socket.getConnectedUsers()
             .then(users => {
+                if (this.disposed) { return; }
                 users.forEach(user => {
                     const onlineUser = {
                         id: user.client_id,
@@ -217,6 +220,7 @@ export class ClientManager {
     }
 
     private scheduleStatusUpdate(reason: string, delayMs = ClientManager.STATUS_UPDATE_DEBOUNCE_MS) {
+        if (this.disposed) { return; }
         if (this.statusUpdateTimer) {
             clearTimeout(this.statusUpdateTimer);
         }
@@ -363,10 +367,12 @@ export class ClientManager {
     }
 
     private async renderCursorDecoration(presenceKey: string, user: ExtendedUpdateUserSchema) {
+        if (this.disposed) { return; }
         const newDoc = this.vfs._resolveById(user.doc_id);
         if (newDoc === undefined) { return; }
 
         const newUri = await resolveProjectRenderUriForPath(this.vfs.origin, newDoc.path);
+        if (this.disposed) { return; }
         const newEditor = newUri && vscode.window.visibleTextEditors.find(e => e.document.uri.toString() === newUri.toString());
 
         if (user.selection===undefined) {
@@ -703,9 +709,10 @@ export class ClientManager {
     }
 
     private async updatePosition(presenceKey:string, sourceClientId: string, docId: string, row: number, column: number, details?:UpdateUserSchema) {
-        if (this.isOwnPresence(sourceClientId, details?.user_id)) { return; }
+        if (this.disposed || this.isOwnPresence(sourceClientId, details?.user_id)) { return; }
 
         await this.migratePresenceKey(sourceClientId, presenceKey);
+        if (this.disposed) { return; }
 
         const existingUser = this.onlineUsers[presenceKey];
         const previousPosition: CollaboratorCursorLocation | undefined = existingUser && {
@@ -990,6 +997,7 @@ export class ClientManager {
     }
 
     setStatusActive(clientId:string, timeout:number=10) {
+        if (this.disposed) { return; }
         this.inactivateTask && clearTimeout(this.inactivateTask);
         this.inactivateTask = setTimeout(() => {
             this.activeExists = undefined;
@@ -1081,6 +1089,19 @@ export class ClientManager {
         return [
             this.status,
             new vscode.Disposable(() => {
+                this.disposed = true;
+                // Disposing a decoration type clears it from every editor.
+                // No asynchronous URI lookup may outlive this cleanup and
+                // recreate native decorations or activity timers.
+                for (const [presenceKey, user] of Object.entries(this.onlineUsers)) {
+                    user.selection?.decoration.dispose();
+                    user.selection = undefined;
+                    delete this.onlineUsers[presenceKey];
+                }
+                this.collaboratorAliases.clear();
+                this.collaboratorColors.clear();
+                this.tetheredClientId = undefined;
+                this.activeExists = undefined;
                 this.diagnosticsStateRegistration.dispose();
                 if (this.inactivateTask) {
                     clearTimeout(this.inactivateTask);

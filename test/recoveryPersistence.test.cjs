@@ -131,3 +131,73 @@ test('project snapshot bursts persist only the active and newest pending snapsho
     assert.equal(persisted.project.name,'last');
     if(process.platform!=='win32')assert.equal((await fs.stat(path.join(root,'.overleaf','offline-project-state.json'))).mode&0o777,0o600);
 });
+
+test('offline-store hydration acquires one lifetime owner before loading queues and close preserves pending work', async t => {
+    const {root} = await fixture(t);
+    const {ProjectOfflineStore} = require('../out/offline/projectOfflineStore');
+    const make = () => new ProjectOfflineStore({globalStorageUri: Uri.file(root)},
+        {query: 'user=owner&project=p', scheme: 'overleaf-workshop'}, 'p', 'Project', 'server');
+    const first = make();
+    t.after(() => first.close());
+    const queued = {version: 1, lastUpdatedAt: new Date().toISOString(), operations: [{
+        id: 'unsent', createdAt: new Date().toISOString(), kind: 'chat.send',
+        payload: {content: 'pending message', localMessageId: 'local'},
+    }]};
+    await first.saveOperationQueue(queued);
+    const reads = await Promise.all(Array.from({length: 20}, () => first.loadOperationQueue()));
+    assert(reads.every(state => state.operations[0].id==='unsent'));
+    const waiting = make();
+    t.after(() => waiting.close());
+    await assert.rejects(waiting.loadOperationQueue(), /another VS Code window/);
+    await first.close();
+    await assert.rejects(first.saveOperationQueue(queued), /has been closed/);
+    // The same previously rejected store/VFS can retry after the other window
+    // closes, without caching the failed acquisition or reloading VS Code.
+    assert.deepEqual((await waiting.loadOperationQueue()).operations, queued.operations);
+});
+
+test('closing during storage discovery cannot acquire and leak a writer claim afterward', async t => {
+    const {root} = await fixture(t);
+    const {ProjectOfflineStore} = require('../out/offline/projectOfflineStore');
+    const make = () => new ProjectOfflineStore({globalStorageUri: Uri.file(root)},
+        {query: 'user=discovery&project=p', scheme: 'overleaf-workshop'}, 'p', 'Project', 'server');
+    const store = make();
+    let release;
+    store.checkLegacyRecoveryState = () => new Promise(resolve => { release = resolve; });
+    const discovery = store.describeStorage();
+    await new Promise(resolve => setImmediate(resolve));
+    await store.close();
+    release();
+    await assert.rejects(discovery, /has been closed/);
+    assert.equal(store.ownership, undefined);
+    const next = make();
+    const info = await next.describeStorage();
+    await next.close();
+    assert.deepEqual(await fs.readdir(info.storageRoot.fsPath), []);
+});
+
+test('closing drains already admitted queue writes and rejects new writes before releasing ownership', async t => {
+    const {root} = await fixture(t);
+    const {ProjectOfflineStore} = require('../out/offline/projectOfflineStore');
+    const make = () => new ProjectOfflineStore({globalStorageUri: Uri.file(root)},
+        {query: 'user=drain&project=p', scheme: 'overleaf-workshop'}, 'p', 'Project', 'server');
+    const store = make();
+    await store.describeStorage();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const resolveStorage = store.resolveStorage.bind(store);
+    store.resolveStorage = async () => { await gate; return resolveStorage(); };
+    const state = {version: 1, lastUpdatedAt: new Date().toISOString(), operations: [{
+        id: 'accepted-before-close', createdAt: new Date().toISOString(), kind: 'chat.delete', payload: {messageId: 'm'},
+    }]};
+    const admitted = store.saveOperationQueue(state);
+    await new Promise(resolve => setImmediate(resolve));
+    const closing = store.close();
+    await assert.rejects(store.saveOperationQueue({...state, operations: []}), /has been closed/);
+    await assert.rejects(store.saveProjectState({}), /has been closed/);
+    release();
+    await Promise.all([admitted, closing]);
+    const next = make();
+    assert.equal((await next.loadOperationQueue()).operations[0].id, 'accepted-before-close');
+    await next.close();
+});

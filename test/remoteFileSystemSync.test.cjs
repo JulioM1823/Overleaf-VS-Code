@@ -15,7 +15,7 @@ const vscode = {
 Module._load = function(request, parent, main) {
     if (request==='vscode') return vscode;
     if (request==='../utils/globalStateManager') return {GlobalStateManager:authState};
-    if (parent?.filename?.endsWith('/core/remoteFileSystemProvider.js') && blockedServices.has(request)) return {};
+    if (parent?.filename?.replace(/\\/g, '/').endsWith('/core/remoteFileSystemProvider.js') && blockedServices.has(request)) return {};
     return originalLoad.call(this, request, parent, main);
 };
 const {VirtualFileSystem, RemoteFileSystemProvider} = require('../out/core/remoteFileSystemProvider');
@@ -35,6 +35,90 @@ test('unscoped filesystem probes cannot create a socket or initialize a project'
     const active=await provider.prefetch(valid);
     assert.equal(await provider.prefetch({...valid,path:'/Audit/main.tex'}),active);
     assert.equal(creations,1);
+});
+
+test('provider shutdown closes every project, waits for late creations and prevents new sessions', async t => {
+    const original = VirtualFileSystem.create;
+    t.after(() => { VirtualFileSystem.create = original; });
+    let finishCreation, finishClose, emitterDisposed = 0, lateClosed = 0;
+    VirtualFileSystem.create = () => new Promise(resolve => { finishCreation = resolve; });
+    const provider = Object.create(RemoteFileSystemProvider.prototype);
+    Object.assign(provider, {vfss: new Map(), pendingVfss: new Map(), notify() {},
+        _emitter: {dispose() { emitterDisposed++; }}});
+    const uri = {scheme: 'overleaf-workshop', authority: 'server', path: '/Project', query: 'user=u&project=p'};
+    const opening = provider.prefetch(uri);
+    const rejected = assert.rejects(opening, /shutting down/);
+    const shutdown = provider.shutdown();
+    finishCreation({close: () => new Promise(resolve => { lateClosed++; finishClose = resolve; })});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(lateClosed, 1);
+    assert.equal(emitterDisposed, 0);
+    finishClose();
+    await Promise.all([rejected, shutdown]);
+    assert.equal(emitterDisposed, 1);
+    assert.equal(provider.vfss.size, 0);
+    assert.equal(provider.pendingVfss.size, 0);
+    await assert.rejects(provider.prefetch(uri), /shutting down/);
+    await provider.shutdown();
+    assert.equal(emitterDisposed, 1);
+});
+
+test('provider shutdown attempts every close even when one project flush fails', async () => {
+    const provider = Object.create(RemoteFileSystemProvider.prototype);
+    const closed = [];
+    Object.assign(provider, {pendingVfss: new Map(), vfss: new Map([
+        ['a', {close: async () => { closed.push('a'); throw new Error('disk failure'); }}],
+        ['b', {close: async () => { closed.push('b'); }}],
+    ]), _emitter: {dispose() { closed.push('emitter'); }}});
+    await assert.rejects(provider.shutdown(), /disk failure/);
+    assert.deepEqual(closed, ['a', 'b', 'emitter']);
+});
+
+test('shutdown waits for baseline blob work before journal/store drain and rejects later recovery mutations', async () => {
+    const vfs = Object.create(VirtualFileSystem.prototype);
+    let release;
+    const events = [];
+    Object.assign(vfs, {disposed: false, logDiagnostic() {},
+        writeDocumentSyncBlob: () => new Promise(resolve => { release = () => resolve('blob'); }),
+        updateDocumentSyncState: async () => { events.push('baseline checkpoint'); },
+        documentSyncJournal: {flush: async () => { events.push('journal drained'); }},
+        offlineStore: {flush: async () => { events.push('store drained'); }},
+    });
+    const baseline = vfs.recordDocumentSyncBaseline({relPath: '/main.tex', content: Buffer.from('text'), reason: 'test', version: 1});
+    vfs.disposed = true;
+    const drain = vfs.flushOfflineProjectStatePersist();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(events, []);
+    await assert.rejects(vfs.markDocumentSyncDirty({relPath: '/later.tex', reason: 'late'}), /session has ended/);
+    release();
+    await Promise.all([baseline, drain]);
+    assert.deepEqual(events, ['baseline checkpoint', 'journal drained', 'store drained']);
+});
+
+test('a failed recovery pipeline cannot release ownership before another accepted pipeline finishes', async () => {
+    const vfs = Object.create(VirtualFileSystem.prototype);
+    let rejectFirst, releaseSecond;
+    const events = [];
+    Object.assign(vfs, {disposed: false, logDiagnostic() {},
+        writeDocumentSyncBlob: content => content.toString()==='bad'
+            ? new Promise((_resolve, reject) => { rejectFirst = reject; })
+            : new Promise(resolve => { releaseSecond = () => resolve('blob'); }),
+        updateDocumentSyncState: async () => { events.push('second checkpoint'); },
+        documentSyncJournal: {flush: async () => { events.push('journal drained'); }},
+        offlineStore: {flush: async () => { events.push('store drained'); }},
+    });
+    const first = vfs.recordDocumentSyncBaseline({relPath: '/bad.tex', content: Buffer.from('bad'), reason: 'test'});
+    const failedWrite = assert.rejects(first, /disk failure/);
+    const second = vfs.recordDocumentSyncBaseline({relPath: '/good.tex', content: Buffer.from('good'), reason: 'test'});
+    vfs.disposed = true;
+    const close = vfs.flushOfflineProjectStatePersist().finally(() => { events.push('ownership released'); });
+    const failedClose = assert.rejects(close, /disk failure/);
+    rejectFirst(new Error('disk failure'));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(events, []);
+    releaseSecond();
+    await Promise.all([failedWrite, second, failedClose]);
+    assert.deepEqual(events, ['second checkpoint', 'journal drained', 'store drained', 'ownership released']);
 });
 
 test('an ended VFS cannot use live socket credentials after the same account signs in again', async t => {

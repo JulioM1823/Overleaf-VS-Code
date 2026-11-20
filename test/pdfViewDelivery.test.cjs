@@ -26,7 +26,7 @@ const vscode = {
 };
 Module._load = function(request, parent, main) {
     if (request === 'vscode') return vscode;
-    if (parent?.filename.endsWith('/core/pdfViewEditorProvider.js')) {
+    if (parent?.filename.replace(/\\/g, '/').endsWith('/core/pdfViewEditorProvider.js')) {
         if (request === '../utils/eventBus') return {EventBus: {fire() {}}};
         if (request === '../utils/diagnostics') return {logDiagnostic() {}};
         if (request === '../utils/globalStateManager') return {GlobalStateManager: {getPdfViewPersist: () => ({})}};

@@ -20,11 +20,13 @@ import {
     serializePersistedLocalReplicaSyncState,
 } from './localReplicaSyncState';
 import {
+    containsLocalReplicaFileUri,
     ensureLocalReplicaCompileWorkspaceDefaults,
     ensureLocalReplicaMetadataDirectory,
     LocalReplicaWorkspaceSettings,
     mapOverleafPathToLocalReplicaFileUri,
     readLocalReplicaSettingsFromWorkspaceRoot,
+    resolveLocalReplicaWorkspaceForFileUri,
     sanitizeLocalReplicaProjectFolderName,
     splitSafeProjectPath,
     writeLocalReplicaSettingsToWorkspaceRoot,
@@ -269,18 +271,8 @@ export class LocalReplicaSCMProvider extends BaseSCM {
     }
 
     public static async uriToPath(uri: vscode.Uri): Promise<string | undefined> {
-        const workspaceRoot = vscode.workspace.workspaceFolders?.find((folder) => folder.uri.scheme==='file')?.uri;
-        if (workspaceRoot===undefined || workspaceRoot.scheme!=='file') {
-            return undefined;
-        }
-
-        const settingUri = vscode.Uri.joinPath(workspaceRoot, `${SETTINGS_DIR_NAME}/${SETTINGS_FILE_NAME}`);
-        try {
-            await vscode.workspace.fs.stat(settingUri);
-            return uri.path.slice(workspaceRoot.path.length);
-        } catch {
-            return undefined;
-        }
+        const workspace = await resolveLocalReplicaWorkspaceForFileUri(uri);
+        return workspace ? uri.path.slice(workspace.workspaceRoot.path.length) || '/' : undefined;
     }
 
     public static async readSettings(workspaceRoot?: vscode.Uri): Promise<LocalReplicaWorkspaceSettings | undefined> {
@@ -347,7 +339,9 @@ export class LocalReplicaSCMProvider extends BaseSCM {
     private matchIgnorePatterns(relPath: string): boolean {
         const ignorePatterns = this.getSetting<string[]>(IGNORE_SETTING_KEY) || this.ignorePatterns;
         for (const pattern of ignorePatterns) {
-            if (minimatch(relPath, pattern, {dot:true})) {
+            // Level 2 enables an upstream optimization-path advisory. Keep the
+            // established level-1 matching semantics explicit for user globs.
+            if (minimatch(relPath, pattern, {dot:true, optimizationLevel:1})) {
                 return true;
             }
         }
@@ -1887,7 +1881,7 @@ export class LocalReplicaSCMProvider extends BaseSCM {
     }
 
     private isLocalDocument(uri: vscode.Uri) {
-        return uri.scheme===this.baseUri.scheme && uri.path.startsWith(this.baseUri.path);
+        return containsLocalReplicaFileUri(this.baseUri, uri);
     }
 
     private async initWatch() {
@@ -1899,7 +1893,7 @@ export class LocalReplicaSCMProvider extends BaseSCM {
             new vscode.RelativePattern(this.vfs.origin, '**/*'),
         );
         this.localWatcher = vscode.workspace.createFileSystemWatcher(
-            new vscode.RelativePattern(this.baseUri.path, '**/*'),
+            new vscode.RelativePattern(this.baseUri, '**/*'),
         );
 
         const overwriteResult = await this.overwrite();

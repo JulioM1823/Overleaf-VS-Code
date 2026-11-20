@@ -3,7 +3,8 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const {createHash} = require('node:crypto');
-const {execFileSync} = require('node:child_process');
+const {parsePatchFile} = require('patch-package/dist/patch/parse');
+const {executeEffects} = require('patch-package/dist/patch/apply');
 const JSZip = require('jszip');
 const root = path.resolve(__dirname, '..');
 const artifacts = {
@@ -28,6 +29,24 @@ async function assertNoSymlinks(rootPath, target) {
         catch (error) { if (error.code!=='ENOENT') throw error; }
     }
 }
+async function applyVendorPatch(destination, patchText) {
+    const effects = parsePatchFile(patchText);
+    for (const effect of effects) {
+        // Vendor patches only edit existing regular files. Reject other patch
+        // effects rather than giving a build input filesystem-wide authority.
+        if (effect.type !== 'patch' || !effect.path || effect.path.includes('\\')
+            || path.isAbsolute(effect.path) || effect.path.split('/').some(part => part === '..')) {
+            throw new Error('Unsafe vendor patch');
+        }
+        const target = path.join(destination, effect.path);
+        await assertNoSymlinks(destination, target);
+        if (!(await fs.lstat(target)).isFile()) throw new Error('Vendor patch target is not a regular file');
+    }
+    // Validate every hunk before changing any file; use the already-installed
+    // JavaScript patch engine so Windows builds do not require Unix `patch`.
+    executeEffects(effects, {cwd: destination, dryRun: true});
+    executeEffects(effects, {cwd: destination, dryRun: false});
+}
 async function install(name, bytes) {
     const artifact = artifacts[name];
     if (!artifact) throw new Error('Unknown vendor artifact');
@@ -47,7 +66,7 @@ async function install(name, bytes) {
         await fs.writeFile(target, await entry.async('nodebuffer'));
     }
     if (name==='pdfjs') {
-        execFileSync('patch', ['--batch', '-p1', '-i', path.join(root, 'scripts/vendor-patches/pdfjs-3.10.111-dist.patch')], {cwd: destination, stdio: 'inherit'});
+        await applyVendorPatch(destination, await fs.readFile(path.join(root, 'scripts/vendor-patches/pdfjs-3.10.111-dist.patch'), 'utf8'));
     }
 }
 async function main() {
@@ -66,5 +85,5 @@ async function main() {
         await install(name, bytes);
     }
 }
-module.exports = {install, artifacts};
+module.exports = {install, artifacts, applyVendorPatch};
 if (require.main===module) main().catch(error => {console.error(error.message); process.exitCode = 1;});

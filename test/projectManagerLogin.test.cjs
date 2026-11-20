@@ -29,7 +29,7 @@ const vscode = {
 };
 Module._load = function(request, parent, main) {
     if (request === 'vscode') { return vscode; }
-    if (parent?.filename.endsWith('/core/projectManagerProvider.js') && request.startsWith('.')) {
+    if (parent?.filename.replace(/\\/g, '/').endsWith('/core/projectManagerProvider.js') && request.startsWith('.')) {
         if (request === '../utils/globalStateManager') { return {GlobalStateManager: state}; }
         return {};
     }

@@ -11,7 +11,7 @@ function uri(project, account='user') {
 }
 Module._load=function(request,parent,main) {
     if(request==='vscode')return {Disposable:class{constructor(fn){this.dispose=fn;}},workspace:{getConfiguration:()=>({get:(_key,fallback)=>fallback})},window:{}};
-    if(parent?.filename.endsWith('/intellisense/texDocumentSymbolProvider.js')){
+    if(parent?.filename.replace(/\\/g, '/').endsWith('/intellisense/texDocumentSymbolProvider.js')){
         if(request==='.')return {IntellisenseProvider:class{constructor(vfsm){this.vfsm=vfsm;}}};
         if(request==='../core/remoteFileSystemProvider')return {parseUri:u=>({serverName:u.authority,userId:new URLSearchParams(u.query).get('user'),projectId:new URLSearchParams(u.query).get('project'),projectName:'Same',pathParts:['main.tex']})};
         if(request==='./texDocumentParseUtility')return {TeXElementType:{SubFile:1,BibFile:2},

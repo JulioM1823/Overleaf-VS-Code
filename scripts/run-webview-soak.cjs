@@ -12,7 +12,8 @@ async function main() {
         throw new Error('Set OVERLEAF_TEST_VSCODE to an installed VS Code executable');
     }
     const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'overleaf-webview-soak-'));
-    const report = path.join(root, 'output/audit-2026-10/webview-soak.json');
+    const report = process.env.OVERLEAF_SOAK_REPORT
+        || path.join(root, 'output/audit-2026-10/webview-soak.json');
     fs.rmSync(report, {force: true});
     try {
         await runInstalledVscode({

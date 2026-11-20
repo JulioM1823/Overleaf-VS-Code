@@ -8,7 +8,13 @@ on:
   workflow_dispatch: {}
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+        vscode: ['1.80.0', stable]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -17,7 +23,16 @@ jobs:
       - run: npm ci && npm ci --prefix views/chat-view
       - run: npm test
       - run: npx --yes @vscode/vsce@4.1.0 package --out orbitleaf.vsix
+      - name: Test installed package (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a node scripts/run-release-compat.cjs orbitleaf.vsix ${{ matrix.vscode }}
+      - name: Test installed package (macOS / Windows)
+        if: runner.os != 'Linux'
+        run: node scripts/run-release-compat.cjs orbitleaf.vsix ${{ matrix.vscode }}
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: orbitleaf-vsix
-          path: orbitleaf.vsix
+          name: orbitleaf-${{ matrix.os }}-${{ matrix.vscode }}
+          path: |
+            orbitleaf.vsix
+            output/release-audit/*.json

@@ -1,0 +1,155 @@
+diff --git a/node_modules/xmlhttprequest/lib/XMLHttpRequest.js b/node_modules/xmlhttprequest/lib/XMLHttpRequest.js
+--- a/node_modules/xmlhttprequest/lib/XMLHttpRequest.js
++++ b/node_modules/xmlhttprequest/lib/XMLHttpRequest.js
+@@ -28,6 +28,7 @@
+   // Holds http.js objects
+   var request;
+   var response;
++  var requestGeneration = 0;
+ 
+   // Request settings
+   var settings = {};
+@@ -389,6 +390,14 @@
+       // Use the proper protocol
+       var doRequest = ssl ? https.request : http.request;
+ 
++      var redirectBase = Url.format({protocol: ssl ? "https:" : "http:", hostname: host || "localhost",
++        port: port, pathname: "/", slashes: true});
++      var redirectUrl = new Url.URL(settings.url, redirectBase);
++      headers.Host = redirectUrl.host;
++      var generation = requestGeneration;
++      var redirectOrigin = redirectUrl.origin;
++      var redirectCount = 0;
++      var redirectMethod = settings.method;
+       // Request is being sent, set send flag
+       sendFlag = true;
+ 
+@@ -397,31 +406,53 @@
+ 
+       // Handler for the response
+       var responseHandler = function responseHandler(resp) {
++        if (!sendFlag || generation !== requestGeneration) { resp.destroy(); return; }
+         // Set response var to the response we got back
+         // This is so it remains accessable outside this scope
+         response = resp;
+-        // Check for redirect
+-        // @TODO Prevent looped redirects
+-        if (response.statusCode === 301 || response.statusCode === 302 || response.statusCode === 303 || response.statusCode === 307) {
+-          // Change URL to the redirect location
+-          settings.url = response.headers.location;
+-          var url = Url.parse(settings.url);
+-          // Set host var in case it's used later
+-          host = url.hostname;
+-          // Options for the new request
+-          var newOptions = {
+-            hostname: url.hostname,
+-            port: url.port,
+-            path: url.path,
+-            method: response.statusCode === 303 ? "GET" : settings.method,
+-            headers: headers,
+-            withCredentials: self.withCredentials
+-          };
+-
+-          // Issue the new request
+-          request = doRequest(newOptions, responseHandler).on("error", errorHandler);
+-          request.end();
+-          // @TODO Check if an XHR event needs to be fired here
++        if ([301, 302, 303, 307, 308].indexOf(response.statusCode) !== -1) {
++          try {
++            var location = response.headers.location;
++            if (typeof location !== "string" || !location.trim()) {
++              throw new Error("Refusing a redirect without a destination");
++            }
++            var nextUrl = new Url.URL(location, redirectUrl);
++            // Cookies are extension-supplied headers, not a browser cookie jar.
++            // Never forward them across a scheme, host, or effective port.
++            if ((nextUrl.protocol !== "http:" && nextUrl.protocol !== "https:")
++                || nextUrl.username || nextUrl.password || nextUrl.origin !== redirectOrigin) {
++              throw new Error("Refusing an unsafe or cross-origin XMLHttpRequest redirect");
++            }
++            if (++redirectCount > 5) { throw new Error("XMLHttpRequest redirect limit exceeded"); }
++            if ((response.statusCode === 303 && redirectMethod !== "HEAD")
++                || ((response.statusCode === 301 || response.statusCode === 302) && redirectMethod === "POST")) {
++              redirectMethod = "GET";
++              data = null;
++              Object.keys(headers).forEach(function(name) {
++                if (/^content-(?:length|type)$/i.test(name)) { delete headers[name]; }
++              });
++            }
++            Object.keys(headers).forEach(function(name) {
++              if (/^host$/i.test(name)) { delete headers[name]; }
++            });
++            headers.Host = nextUrl.host;
++            // Destroy unused bodies, including streaming redirects, before
++            // replacing the request so abort never loses an active socket.
++            response.destroy();
++            redirectUrl = nextUrl;
++            var newOptions = {
++              hostname: nextUrl.hostname.replace(/^\[|\]$/g, ""),
++              port: nextUrl.port || (ssl ? 443 : 80),
++              path: nextUrl.pathname + nextUrl.search,
++              method: redirectMethod,
++              headers: headers,
++              agent: false,
++              withCredentials: self.withCredentials
++            };
++            request = doRequest(newOptions, responseHandler).on("error", errorHandler);
++            if (data) { request.write(data); }
++            request.end();
++          } catch (error) { errorHandler(error); }
+           return;
+         }
+ 
+@@ -431,6 +462,7 @@
+         self.status = response.statusCode;
+ 
+         response.on("data", function(chunk) {
++          if (generation !== requestGeneration) { return; }
+           // Make sure there's some data
+           if (chunk) {
+             self.responseText += chunk;
+@@ -442,7 +474,7 @@
+         });
+ 
+         response.on("end", function() {
+-          if (sendFlag) {
++          if (sendFlag && generation === requestGeneration) {
+             // Discard the end event if the connection has been aborted
+             setState(self.DONE);
+             sendFlag = false;
+@@ -450,12 +482,16 @@
+         });
+ 
+         response.on("error", function(error) {
+-          self.handleError(error);
++          errorHandler(error);
+         });
+       };
+ 
+       // Error handler for the request
+       var errorHandler = function errorHandler(error) {
++        if (!sendFlag || generation !== requestGeneration) { return; }
++        sendFlag = false;
++        if (response) { response.destroy(); }
++        if (request) { request.destroy(); }
+         self.handleError(error);
+       };
+ 
+@@ -537,12 +573,16 @@
+    * Aborts a request.
+    */
+   this.abort = function() {
++    requestGeneration++;
+     if (request) {
+       request.abort();
+       request = null;
+     }
+ 
+-    headers = defaultHeaders;
++    if (response && typeof response.destroy === "function") { response.destroy(); }
++    response = undefined;
++    headers = Object.assign({}, defaultHeaders);
++    headersCase = {};
+     this.status = 0;
+     this.responseText = "";
+     this.responseXML = "";

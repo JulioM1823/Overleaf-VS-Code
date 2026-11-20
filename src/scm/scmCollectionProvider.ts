@@ -20,15 +20,13 @@ type SupportedSCM = typeof supportedSCMs[number];
 // Older releases persisted local file-system SCM roots as bare paths instead of
 // URI strings. Recover them as file: URIs so background SCM restoration does
 // not misclassify valid local replicas as creation failures.
-function revivePersistedSCMBaseUri(rawBaseUri: string) {
-    const parsed = vscode.Uri.parse(rawBaseUri);
-    if (parsed.scheme) {
-        return parsed;
-    }
-    if (path.isAbsolute(rawBaseUri) || /^[a-zA-Z]:[\\/]/.test(rawBaseUri)) {
+export function revivePersistedSCMBaseUri(rawBaseUri: string) {
+    // A drive letter also satisfies URI scheme syntax. Recognize legacy native
+    // roots before parsing, including UNC paths restored on another platform.
+    if (path.isAbsolute(rawBaseUri) || /^[a-zA-Z]:[\\/]/.test(rawBaseUri) || rawBaseUri.startsWith('\\\\')) {
         return vscode.Uri.file(rawBaseUri);
     }
-    return parsed;
+    return vscode.Uri.parse(rawBaseUri);
 }
 
 async function shouldSkipMissingLocalReplicaRestore(baseUri: vscode.Uri, scmLabel: string) {
@@ -89,6 +87,7 @@ type DiagnosticsAwareSCM = BaseSCM & {
 };
 
 export class SCMCollectionProvider extends vscode.Disposable {
+    private disposed = false;
     private readonly core: CoreSCMProvider;
     private readonly scms: SCMRecord[] = [];
     private readonly statusBarItem: vscode.StatusBarItem;
@@ -101,12 +100,13 @@ export class SCMCollectionProvider extends vscode.Disposable {
     ) {
         // define the dispose behavior
         super(() => {
-            this.scms.forEach(scm => scm.triggers.forEach(t => t.dispose()));
+            this.disposed = true;
+            this.scms.splice(0).forEach(scm => this.disposeSCMTriggers(scm.triggers));
         });
 
         this.core = new CoreSCMProvider( vfs );
         this.historyDataProvider = new HistoryViewProvider( vfs );
-        this.initSCMs();
+        void this.initSCMs().catch(error => this.logDiagnostic('scm.init_from_persist_failed', {}, error));
 
         this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
         this.statusBarItem.command = `${ROOT_NAME}.projectSCM.configSCM`;
@@ -121,6 +121,13 @@ export class SCMCollectionProvider extends vscode.Disposable {
             serverName: this.vfs.serverName,
             ...fields,
         }, error);
+    }
+
+    private disposeSCMTriggers(triggers: vscode.Disposable[]) {
+        for (const trigger of triggers) {
+            try { trigger.dispose(); }
+            catch (error) { this.logDiagnostic('scm.trigger_dispose_failed', {}, error); }
+        }
     }
 
     private updateStatus() {
@@ -188,17 +195,21 @@ export class SCMCollectionProvider extends vscode.Disposable {
         };
     }
 
-    private initSCMs() {
+    private async initSCMs() {
+        if (this.disposed) { return; }
         const scmPersists = GlobalStateManager.getServerProjectSCMPersists(this.context, this.vfs.serverName, this.vfs.projectId);
         this.logDiagnostic('scm.init_from_persist_started', {
             persistCount: Object.keys(scmPersists).length,
         });
-        Object.entries(scmPersists).forEach(async ([scmKey, scmPersist]) => {
-            const scmProto = supportedSCMs.find(scm => scm.label===scmPersist.label);
-            if (scmProto!==undefined) {
+        await Promise.all(Object.entries(scmPersists).map(async ([scmKey, scmPersist]) => {
+            try {
+                if (this.disposed) { return; }
+                const scmProto = supportedSCMs.find(scm => scm.label===scmPersist.label);
+                if (scmProto===undefined) { return; }
                 const enabled = scmPersist.enabled ?? true;
                 const baseUri = revivePersistedSCMBaseUri(scmPersist.baseUri);
                 if (await shouldSkipMissingLocalReplicaRestore(baseUri, scmPersist.label)) {
+                    if (this.disposed) { return; }
                     this.logDiagnostic('scm.restore_skipped_missing_local_replica', {
                         baseUri: baseUri.toString(),
                         scmKey,
@@ -210,22 +221,31 @@ export class SCMCollectionProvider extends vscode.Disposable {
                     });
                     return;
                 }
+                if (this.disposed) { return; }
                 await this.createSCM(scmProto, baseUri, false, enabled);
+            } catch (error) {
+                this.logDiagnostic('scm.restore_failed', {scmKey, scmLabel: scmPersist?.label}, error);
             }
-        });
+        }));
     }
 
     private async createSCM(scmProto: SupportedSCM, baseUri: vscode.Uri, newSCM=false, enabled=true) {
+        if (this.disposed) { return undefined; }
         this.logDiagnostic('scm.create_started', {
             baseUri: baseUri.toString(),
             enabled,
             newSCM,
             scmLabel: scmProto.label,
         });
-        const scm = new scmProto(this.vfs, baseUri);
+        let triggers: vscode.Disposable[] = [];
         // insert into collection
         try {
-            const triggers = enabled ? await scm.triggers : [];
+            const scm = new scmProto(this.vfs, baseUri);
+            triggers = enabled ? await scm.triggers : [];
+            if (this.disposed) {
+                this.disposeSCMTriggers(triggers);
+                return undefined;
+            }
             if (newSCM) {
                 this.vfs.setProjectSCMPersist(scm.scmKey, {
                     enabled: enabled,
@@ -245,6 +265,7 @@ export class SCMCollectionProvider extends vscode.Disposable {
             });
             return scm;
         } catch (error) {
+            this.disposeSCMTriggers(triggers);
             // permanently remove failed scm
             // this.vfs.setProjectSCMPersist(scm.scmKey, undefined);
             this.logDiagnostic('scm.create_failed', {
@@ -258,7 +279,7 @@ export class SCMCollectionProvider extends vscode.Disposable {
             // simply live-editing, keep the failure in diagnostics and avoid a
             // noisy popup. Explicit user-created SCMs should still report the
             // failure immediately.
-            if (newSCM) {
+            if (newSCM && !this.disposed) {
                 vscode.window.showErrorMessage( vscode.l10n.t('"{scm}" creation failed.', {scm:scmProto.label}) );
             } else {
                 this.logDiagnostic('scm.create_failed_notification_suppressed', {

@@ -37,7 +37,7 @@ export function activate(context: vscode.ExtensionContext) {
     const documentSessionManager = new DocumentSessionManager(remoteFileSystemProvider);
     persistOpenDrafts = async () => {
         try { await documentSessionManager.persistOpenDrafts(); }
-        finally { await remoteFileSystemProvider.flushPendingWrites(); }
+        finally { await remoteFileSystemProvider.shutdown(); }
     };
     context.subscriptions.push( ...documentSessionManager.triggers );
 

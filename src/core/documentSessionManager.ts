@@ -298,11 +298,18 @@ export class DocumentSessionManager {
     }
 
     private async attachDocument(document: vscode.TextDocument, reason: string) {
-        if (this.disposed) { return undefined; }
+        if (this.disposed || document.isClosed) { return undefined; }
         markManagedDocumentPending(document.uri);
-        const binding = await this.resolveBinding(document);
-        if (!binding || this.disposed) {
-            clearManagedDocumentUri(document.uri);
+        let binding: DocumentSessionBinding | undefined;
+        try { binding = await this.resolveBinding(document); }
+        catch (error) {
+            // A failed join must not leave a pending registry entry suppressing
+            // replica filesystem synchronization indefinitely.
+            if (!this.sessionKeyByDocumentUri.has(document.uri.toString())) { clearManagedDocumentUri(document.uri); }
+            throw error;
+        }
+        if (!binding || this.disposed || document.isClosed) {
+            if (!this.sessionKeyByDocumentUri.has(document.uri.toString())) { clearManagedDocumentUri(document.uri); }
             return undefined;
         }
 
@@ -407,11 +414,11 @@ export class DocumentSessionManager {
     private detachDocument(document: vscode.TextDocument) {
         const uriKey = document.uri.toString();
         const sessionKey = this.sessionKeyByDocumentUri.get(uriKey);
+        clearManagedDocumentUri(document.uri);
         if (!sessionKey) {
             return;
         }
         this.sessionKeyByDocumentUri.delete(uriKey);
-        clearManagedDocumentUri(document.uri);
         const session = this.sessions.get(sessionKey);
         if (!session) {
             return;
@@ -1130,11 +1137,14 @@ export class DocumentSessionManager {
         if (!session) {
             return;
         }
-        if (this.consumeSuppressedDocumentChange(document.uri, nextLocalText)) {
-            session.localText = nextLocalText;
+        // Binding can wait for authentication, network joins and recovery I/O.
+        // Earlier change events must not restore text captured before that wait.
+        const currentLocalText = document.getText();
+        if (this.consumeSuppressedDocumentChange(document.uri, currentLocalText)) {
+            session.localText = currentLocalText;
             return;
         }
-        await this.processSessionDocumentChange(session, nextLocalText);
+        await this.processSessionDocumentChange(session, currentLocalText);
     }
 
     private async processSessionDocumentChange(
@@ -1356,7 +1366,7 @@ export class DocumentSessionManager {
         this.initialAttachTimer = setTimeout(() => {
             this.initialAttachTimer = undefined;
             for (const document of vscode.workspace.textDocuments) {
-                void this.attachDocument(document, 'initial_attach');
+                this.runBackground(this.attachDocument(document, 'initial_attach'));
             }
         }, 100);
         return [
@@ -1364,7 +1374,7 @@ export class DocumentSessionManager {
                 if (this.isManagedDocument(document)) {
                     markManagedDocumentPending(document.uri);
                 }
-                void this.attachDocument(document, 'document_opened');
+                this.runBackground(this.attachDocument(document, 'document_opened'));
             }),
             vscode.workspace.onDidCloseTextDocument((document) => {
                 this.detachDocument(document);

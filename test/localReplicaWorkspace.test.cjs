@@ -44,10 +44,18 @@ Module._load = function patchedLoad(request, parent, isMain) {
 };
 
 const {
+    containsLocalReplicaFileUri,
     ensureLocalReplicaMetadataDirectory,
     splitSafeProjectPath,
     writeLocalReplicaSettingsToWorkspaceRoot,
 } = require('../out/scm/localReplicaWorkspace.js');
+
+test('replica containment requires a directory boundary and the same UNC host', () => {
+    const root = {scheme: 'file', authority: 'host-a', path: '/share/paper'};
+    assert.equal(containsLocalReplicaFileUri(root, {...root, path: '/share/paper/main.tex'}), true);
+    assert.equal(containsLocalReplicaFileUri(root, {...root, path: '/share/paper-other/main.tex'}), false);
+    assert.equal(containsLocalReplicaFileUri(root, {...root, authority: 'host-b', path: '/share/paper/main.tex'}), false);
+});
 
 test('splitSafeProjectPath accepts normal project paths', () => {
     assert.deepEqual(splitSafeProjectPath('/sections/intro.tex'), ['sections', 'intro.tex']);

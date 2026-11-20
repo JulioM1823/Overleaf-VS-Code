@@ -1,4 +1,5 @@
 import { AsyncQueue } from '../utils/asyncQueue';
+import { StorageOwnershipError } from '../utils/storageOwnership';
 /* eslint-disable @typescript-eslint/naming-convention */
 import * as vscode from 'vscode';
 import * as DiffMatchPatch from 'diff-match-patch';
@@ -483,6 +484,8 @@ export class VirtualFileSystem extends vscode.Disposable {
     private readonly chatSession: ProjectChatSession;
     private readonly diagnosticsStateProviderRegistrations: Array<{dispose: () => void}> = [];
     private disposed = false;
+    private disposalPromise?: Promise<void>;
+    private persistenceTasks?: Set<Promise<unknown>>;
     private sessionEndedSubscription?: vscode.Disposable;
 
     public readonly origin: vscode.Uri;
@@ -509,7 +512,9 @@ export class VirtualFileSystem extends vscode.Disposable {
                 clearTimeout(this.pendingDisconnectNotificationTimer);
                 this.pendingDisconnectNotificationTimer = undefined;
             }
-            void this.flushOfflineProjectStatePersist();
+            this.disposalPromise = this.flushOfflineProjectStatePersist()
+                .finally(() => this.offlineStore?.close());
+            void this.disposalPromise.catch(error => this.logDiagnostic('offline.store_close_failed', {}, error));
             if (this.recoveryTimer) {
                 clearTimeout(this.recoveryTimer);
                 this.recoveryTimer = undefined;
@@ -625,6 +630,20 @@ export class VirtualFileSystem extends vscode.Disposable {
         return this.disposed;
     }
 
+    async close() {
+        this.dispose();
+        await this.disposalPromise;
+    }
+
+    private trackRecoveryMutation<T>(task: () => Promise<T>): Promise<T> {
+        if (this.disposed) { return Promise.reject(new Error('The project session has ended; recovery writes are closed')); }
+        const pending = task();
+        this.persistenceTasks ??= new Set();
+        this.persistenceTasks.add(pending);
+        void pending.then(() => this.persistenceTasks?.delete(pending), () => this.persistenceTasks?.delete(pending));
+        return pending;
+    }
+
     get _userId() {
         return this.userId;
     }
@@ -699,19 +718,23 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     async persistDocumentSyncRecord(record: DocumentSyncRecord, reason: string) {
-        const relPath = this.normalizeDocumentSyncRelPath(record.relPath);
-        await this.updateDocumentSyncState(reason, {relPath}, (state) => {
-            state.records[relPath] = {
-                ...record,
-                relPath,
-            };
+        return this.trackRecoveryMutation(async () => {
+            const relPath = this.normalizeDocumentSyncRelPath(record.relPath);
+            await this.updateDocumentSyncState(reason, {relPath}, (state) => {
+                state.records[relPath] = {
+                    ...record,
+                    relPath,
+                };
+            });
         });
     }
 
     async removeDocumentSyncRecord(relPath: string, reason: string) {
-        const normalizedRelPath = this.normalizeDocumentSyncRelPath(relPath);
-        await this.updateDocumentSyncState(reason, {relPath: normalizedRelPath}, (state) => {
-            delete state.records[normalizedRelPath];
+        return this.trackRecoveryMutation(async () => {
+            const normalizedRelPath = this.normalizeDocumentSyncRelPath(relPath);
+            await this.updateDocumentSyncState(reason, {relPath: normalizedRelPath}, (state) => {
+                delete state.records[normalizedRelPath];
+            });
         });
     }
 
@@ -724,10 +747,10 @@ export class VirtualFileSystem extends vscode.Disposable {
     }
 
     async materializeDocumentSyncConflict(relPath: string, conflict: DocumentSyncConflictState) {
-        return this.documentSyncJournal.materializeConflictFiles(
+        return this.trackRecoveryMutation(() => this.documentSyncJournal.materializeConflictFiles(
             this.normalizeDocumentSyncRelPath(relPath),
             conflict,
-        );
+        ));
     }
 
     async markDocumentSyncDirty(arg: {
@@ -739,41 +762,43 @@ export class VirtualFileSystem extends vscode.Disposable {
         reason: string,
         relPath: string,
     }) {
-        const relPath = this.normalizeDocumentSyncRelPath(arg.relPath);
-        const baseSnapshot = this.createFileSnapshot(arg.baseContent);
-        const lastKnownRemoteSnapshot = this.createFileSnapshot(arg.lastKnownRemoteContent);
-        const baseBlobId = arg.baseContent ? await this.writeDocumentSyncBlob(arg.baseContent) : undefined;
-        await this.updateDocumentSyncState(arg.reason, {
-            docId: arg.docId ?? '',
-            relPath,
-        }, (state) => {
-            const existing = state.records[relPath];
-            const remoteVersion = arg.lastKnownRemoteVersion ?? arg.baseVersion;
-            const preserveRemoteState = existing?.lastKnownRemoteVersion!==undefined
-                && (remoteVersion===undefined || remoteVersion<existing.lastKnownRemoteVersion);
-            state.records[relPath] = {
-                baseBlobId: existing?.baseBlobId ?? baseBlobId,
-                baseSnapshot: existing?.baseSnapshot ?? baseSnapshot,
-                baseVersion: existing?.baseVersion ?? arg.baseVersion,
-                conflict: existing?.conflict,
-                docId: arg.docId ?? existing?.docId,
-                lastKnownRemoteSnapshot: preserveRemoteState ? existing?.lastKnownRemoteSnapshot : lastKnownRemoteSnapshot ?? existing?.lastKnownRemoteSnapshot ?? baseSnapshot,
-                lastKnownRemoteVersion: preserveRemoteState ? existing?.lastKnownRemoteVersion : remoteVersion ?? existing?.lastKnownRemoteVersion,
-                lastRecoveryRunId: existing?.lastRecoveryRunId,
-                localBlobId: existing?.localBlobId,
+        return this.trackRecoveryMutation(async () => {
+            const relPath = this.normalizeDocumentSyncRelPath(arg.relPath);
+            const baseSnapshot = this.createFileSnapshot(arg.baseContent);
+            const lastKnownRemoteSnapshot = this.createFileSnapshot(arg.lastKnownRemoteContent);
+            const baseBlobId = arg.baseContent ? await this.writeDocumentSyncBlob(arg.baseContent) : undefined;
+            await this.updateDocumentSyncState(arg.reason, {
+                docId: arg.docId ?? '',
+                relPath,
+            }, (state) => {
+                const existing = state.records[relPath];
+                const remoteVersion = arg.lastKnownRemoteVersion ?? arg.baseVersion;
+                const preserveRemoteState = existing?.lastKnownRemoteVersion!==undefined
+                    && (remoteVersion===undefined || remoteVersion<existing.lastKnownRemoteVersion);
+                state.records[relPath] = {
+                    baseBlobId: existing?.baseBlobId ?? baseBlobId,
+                    baseSnapshot: existing?.baseSnapshot ?? baseSnapshot,
+                    baseVersion: existing?.baseVersion ?? arg.baseVersion,
+                    conflict: existing?.conflict,
+                    docId: arg.docId ?? existing?.docId,
+                    lastKnownRemoteSnapshot: preserveRemoteState ? existing?.lastKnownRemoteSnapshot : lastKnownRemoteSnapshot ?? existing?.lastKnownRemoteSnapshot ?? baseSnapshot,
+                    lastKnownRemoteVersion: preserveRemoteState ? existing?.lastKnownRemoteVersion : remoteVersion ?? existing?.lastKnownRemoteVersion,
+                    lastRecoveryRunId: existing?.lastRecoveryRunId,
+                    localBlobId: existing?.localBlobId,
+                    localDirty: true,
+                    relPath,
+                };
+            });
+            this.logDiagnostic('document_sync.marked_dirty', {
+                baseHash: baseSnapshot?.hash,
+                baseVersion: arg.baseVersion ?? -1,
+                docId: arg.docId ?? '',
+                lastKnownRemoteHash: lastKnownRemoteSnapshot?.hash,
+                lastKnownRemoteVersion: arg.lastKnownRemoteVersion ?? -1,
                 localDirty: true,
                 relPath,
-            };
-        });
-        this.logDiagnostic('document_sync.marked_dirty', {
-            baseHash: baseSnapshot?.hash,
-            baseVersion: arg.baseVersion ?? -1,
-            docId: arg.docId ?? '',
-            lastKnownRemoteHash: lastKnownRemoteSnapshot?.hash,
-            lastKnownRemoteVersion: arg.lastKnownRemoteVersion ?? -1,
-            localDirty: true,
-            relPath,
-            reason: arg.reason,
+                reason: arg.reason,
+            });
         });
     }
 
@@ -784,36 +809,38 @@ export class VirtualFileSystem extends vscode.Disposable {
         relPath: string,
         version?: number,
     }) {
-        const relPath = this.normalizeDocumentSyncRelPath(arg.relPath);
-        const snapshot = this.createFileSnapshot(arg.content);
-        await this.updateDocumentSyncState(arg.reason, {
-            docId: arg.docId ?? '',
-            relPath,
-        }, (state) => {
-            const existing = state.records[relPath];
-            if (arg.version!==undefined && existing?.lastKnownRemoteVersion!==undefined
-                && arg.version < existing.lastKnownRemoteVersion) { return; }
-            if (!existing) {
-                if (!snapshot) {
+        return this.trackRecoveryMutation(async () => {
+            const relPath = this.normalizeDocumentSyncRelPath(arg.relPath);
+            const snapshot = this.createFileSnapshot(arg.content);
+            await this.updateDocumentSyncState(arg.reason, {
+                docId: arg.docId ?? '',
+                relPath,
+            }, (state) => {
+                const existing = state.records[relPath];
+                if (arg.version!==undefined && existing?.lastKnownRemoteVersion!==undefined
+                    && arg.version < existing.lastKnownRemoteVersion) { return; }
+                if (!existing) {
+                    if (!snapshot) {
+                        return;
+                    }
+                    state.records[relPath] = {
+                        baseSnapshot: snapshot,
+                        baseVersion: arg.version,
+                        docId: arg.docId,
+                        lastKnownRemoteSnapshot: snapshot,
+                        lastKnownRemoteVersion: arg.version,
+                        localDirty: false,
+                        relPath,
+                    };
                     return;
                 }
                 state.records[relPath] = {
-                    baseSnapshot: snapshot,
-                    baseVersion: arg.version,
-                    docId: arg.docId,
-                    lastKnownRemoteSnapshot: snapshot,
-                    lastKnownRemoteVersion: arg.version,
-                    localDirty: false,
-                    relPath,
+                    ...existing,
+                    docId: arg.docId ?? existing.docId,
+                    lastKnownRemoteSnapshot: snapshot ?? existing.lastKnownRemoteSnapshot,
+                    lastKnownRemoteVersion: arg.version ?? existing.lastKnownRemoteVersion,
                 };
-                return;
-            }
-            state.records[relPath] = {
-                ...existing,
-                docId: arg.docId ?? existing.docId,
-                lastKnownRemoteSnapshot: snapshot ?? existing.lastKnownRemoteSnapshot,
-                lastKnownRemoteVersion: arg.version ?? existing.lastKnownRemoteVersion,
-            };
+            });
         });
     }
 
@@ -824,41 +851,43 @@ export class VirtualFileSystem extends vscode.Disposable {
         relPath: string,
         version?: number,
     }) {
-        const relPath = this.normalizeDocumentSyncRelPath(arg.relPath);
-        const snapshot = createLocalReplicaSnapshot('file', arg.content);
-        const blobId = await this.writeDocumentSyncBlob(arg.content);
-        await this.updateDocumentSyncState(arg.reason, {
-            docId: arg.docId ?? '',
-            relPath,
-        }, (state) => {
-            const existing = state.records[relPath];
-            if (arg.version!==undefined && existing?.lastKnownRemoteVersion!==undefined
-                && arg.version < existing.lastKnownRemoteVersion) { return; }
-            const pendingLocalBlob = existing?.localBlobId!==blobId ? existing?.localBlobId : undefined;
-            state.records[relPath] = {
-                baseBlobId: blobId,
-                baseSnapshot: snapshot,
-                baseVersion: arg.version,
-                conflict: undefined,
-                docId: arg.docId,
-                lastKnownRemoteSnapshot: snapshot,
-                lastKnownRemoteVersion: arg.version,
-                lastRecoveryRunId: undefined,
-                localBlobId: pendingLocalBlob,
-                localDirty: pendingLocalBlob!==undefined,
+        return this.trackRecoveryMutation(async () => {
+            const relPath = this.normalizeDocumentSyncRelPath(arg.relPath);
+            const snapshot = createLocalReplicaSnapshot('file', arg.content);
+            const blobId = await this.writeDocumentSyncBlob(arg.content);
+            await this.updateDocumentSyncState(arg.reason, {
+                docId: arg.docId ?? '',
                 relPath,
-            };
-        });
-        this.logDiagnostic('document_sync.baseline_recorded', {
-            baseBlobPresent: true,
-            baseHash: snapshot.hash,
-            baseVersion: arg.version ?? -1,
-            docId: arg.docId ?? '',
-            localDirty: false,
-            relPath,
-            reason: arg.reason,
-            remoteHash: snapshot.hash,
-            remoteVersion: arg.version ?? -1,
+            }, (state) => {
+                const existing = state.records[relPath];
+                if (arg.version!==undefined && existing?.lastKnownRemoteVersion!==undefined
+                    && arg.version < existing.lastKnownRemoteVersion) { return; }
+                const pendingLocalBlob = existing?.localBlobId!==blobId ? existing?.localBlobId : undefined;
+                state.records[relPath] = {
+                    baseBlobId: blobId,
+                    baseSnapshot: snapshot,
+                    baseVersion: arg.version,
+                    conflict: undefined,
+                    docId: arg.docId,
+                    lastKnownRemoteSnapshot: snapshot,
+                    lastKnownRemoteVersion: arg.version,
+                    lastRecoveryRunId: undefined,
+                    localBlobId: pendingLocalBlob,
+                    localDirty: pendingLocalBlob!==undefined,
+                    relPath,
+                };
+            });
+            this.logDiagnostic('document_sync.baseline_recorded', {
+                baseBlobPresent: true,
+                baseHash: snapshot.hash,
+                baseVersion: arg.version ?? -1,
+                docId: arg.docId ?? '',
+                localDirty: false,
+                relPath,
+                reason: arg.reason,
+                remoteHash: snapshot.hash,
+                remoteVersion: arg.version ?? -1,
+            });
         });
     }
 
@@ -874,73 +903,77 @@ export class VirtualFileSystem extends vscode.Disposable {
         relPath: string,
         remoteContent?: Uint8Array,
     }) {
-        // Order complete conflict checkpoints with draft writes from subsequent
-        // keystrokes, including blob I/O before the journal transaction.
-        this.draftWrites ??= new AsyncQueue();
-        return this.draftWrites.run(async () => {
-            const relPath = this.normalizeDocumentSyncRelPath(arg.relPath);
-            const baseBlobId = arg.baseContent ? await this.writeDocumentSyncBlob(arg.baseContent) : undefined;
-            const localBlobId = arg.localContent ? await this.writeDocumentSyncBlob(arg.localContent) : undefined;
-            const remoteBlobId = arg.remoteContent ? await this.writeDocumentSyncBlob(arg.remoteContent) : undefined;
-            const baseSnapshot = this.createFileSnapshot(arg.baseContent);
-            const remoteSnapshot = this.createFileSnapshot(arg.remoteContent ?? arg.lastKnownRemoteContent);
-            const conflict: DocumentSyncConflictState = {
-                baseBlobId,
-                detectedAt: new Date().toISOString(),
-                localBlobId,
-                reason: arg.reason,
-                remoteBlobId,
-            };
-            await this.updateDocumentSyncState(arg.reason, {
-                docId: arg.docId ?? '',
-                relPath,
-            }, (state) => {
-                const existing = state.records[relPath];
-                const remoteVersion = arg.lastKnownRemoteVersion ?? arg.baseVersion;
-                const preserveRemoteState = existing?.lastKnownRemoteVersion!==undefined
-                    && (remoteVersion===undefined || remoteVersion<existing.lastKnownRemoteVersion);
-                state.records[relPath] = {
-                    baseBlobId: existing?.baseBlobId ?? baseBlobId,
-                    baseSnapshot: existing?.baseSnapshot ?? baseSnapshot,
-                    baseVersion: existing?.baseVersion ?? arg.baseVersion,
-                    conflict,
-                    docId: arg.docId ?? existing?.docId,
-                    lastKnownRemoteSnapshot: preserveRemoteState ? existing?.lastKnownRemoteSnapshot : remoteSnapshot ?? existing?.lastKnownRemoteSnapshot,
-                    lastKnownRemoteVersion: preserveRemoteState ? existing?.lastKnownRemoteVersion : remoteVersion ?? existing?.lastKnownRemoteVersion,
-                    lastRecoveryRunId: arg.recoveryRunId ?? existing?.lastRecoveryRunId,
-                    localBlobId: localBlobId ?? existing?.localBlobId,
-                    localDirty: true,
-                    relPath,
+        return this.trackRecoveryMutation(async () => {
+            // Order complete conflict checkpoints with draft writes from subsequent
+            // keystrokes, including blob I/O before the journal transaction.
+            this.draftWrites ??= new AsyncQueue();
+            return this.draftWrites.run(async () => {
+                const relPath = this.normalizeDocumentSyncRelPath(arg.relPath);
+                const baseBlobId = arg.baseContent ? await this.writeDocumentSyncBlob(arg.baseContent) : undefined;
+                const localBlobId = arg.localContent ? await this.writeDocumentSyncBlob(arg.localContent) : undefined;
+                const remoteBlobId = arg.remoteContent ? await this.writeDocumentSyncBlob(arg.remoteContent) : undefined;
+                const baseSnapshot = this.createFileSnapshot(arg.baseContent);
+                const remoteSnapshot = this.createFileSnapshot(arg.remoteContent ?? arg.lastKnownRemoteContent);
+                const conflict: DocumentSyncConflictState = {
+                    baseBlobId,
+                    detectedAt: new Date().toISOString(),
+                    localBlobId,
+                    reason: arg.reason,
+                    remoteBlobId,
                 };
-            });
-            this.logDiagnostic('document_sync.conflict_recorded', {
-                baseBlobPresent: baseBlobId !== undefined,
-                baseHash: baseSnapshot?.hash,
-                baseVersion: arg.baseVersion ?? -1,
-                conflictStatePresent: true,
-                docId: arg.docId ?? '',
-                localHash: arg.localContent ? createLocalReplicaSnapshot('file', arg.localContent).hash : undefined,
-                relPath,
-                remoteHash: remoteSnapshot?.hash,
-                remoteVersion: arg.lastKnownRemoteVersion ?? -1,
-                reason: arg.reason,
-                recoveryRunId: arg.recoveryRunId ?? '',
+                await this.updateDocumentSyncState(arg.reason, {
+                    docId: arg.docId ?? '',
+                    relPath,
+                }, (state) => {
+                    const existing = state.records[relPath];
+                    const remoteVersion = arg.lastKnownRemoteVersion ?? arg.baseVersion;
+                    const preserveRemoteState = existing?.lastKnownRemoteVersion!==undefined
+                        && (remoteVersion===undefined || remoteVersion<existing.lastKnownRemoteVersion);
+                    state.records[relPath] = {
+                        baseBlobId: existing?.baseBlobId ?? baseBlobId,
+                        baseSnapshot: existing?.baseSnapshot ?? baseSnapshot,
+                        baseVersion: existing?.baseVersion ?? arg.baseVersion,
+                        conflict,
+                        docId: arg.docId ?? existing?.docId,
+                        lastKnownRemoteSnapshot: preserveRemoteState ? existing?.lastKnownRemoteSnapshot : remoteSnapshot ?? existing?.lastKnownRemoteSnapshot,
+                        lastKnownRemoteVersion: preserveRemoteState ? existing?.lastKnownRemoteVersion : remoteVersion ?? existing?.lastKnownRemoteVersion,
+                        lastRecoveryRunId: arg.recoveryRunId ?? existing?.lastRecoveryRunId,
+                        localBlobId: localBlobId ?? existing?.localBlobId,
+                        localDirty: true,
+                        relPath,
+                    };
+                });
+                this.logDiagnostic('document_sync.conflict_recorded', {
+                    baseBlobPresent: baseBlobId !== undefined,
+                    baseHash: baseSnapshot?.hash,
+                    baseVersion: arg.baseVersion ?? -1,
+                    conflictStatePresent: true,
+                    docId: arg.docId ?? '',
+                    localHash: arg.localContent ? createLocalReplicaSnapshot('file', arg.localContent).hash : undefined,
+                    relPath,
+                    remoteHash: remoteSnapshot?.hash,
+                    remoteVersion: arg.lastKnownRemoteVersion ?? -1,
+                    reason: arg.reason,
+                    recoveryRunId: arg.recoveryRunId ?? '',
+                });
             });
         });
     }
 
     async clearDocumentSyncConflict(relPath: string, reason: string) {
-        const normalizedRelPath = this.normalizeDocumentSyncRelPath(relPath);
-        await this.updateDocumentSyncState(reason, {relPath: normalizedRelPath}, (state) => {
-            const existing = state.records[normalizedRelPath];
-            if (!existing?.conflict) {
-                return;
-            }
-            state.records[normalizedRelPath] = {
-                ...existing,
-                conflict: undefined,
-                lastRecoveryRunId: undefined,
-            };
+        return this.trackRecoveryMutation(async () => {
+            const normalizedRelPath = this.normalizeDocumentSyncRelPath(relPath);
+            await this.updateDocumentSyncState(reason, {relPath: normalizedRelPath}, (state) => {
+                const existing = state.records[normalizedRelPath];
+                if (!existing?.conflict) {
+                    return;
+                }
+                state.records[normalizedRelPath] = {
+                    ...existing,
+                    conflict: undefined,
+                    lastRecoveryRunId: undefined,
+                };
+            });
         });
     }
 
@@ -1903,7 +1936,22 @@ export class VirtualFileSystem extends vscode.Disposable {
         }
         await this.offlineStatePersistPromise;
         await this.draftWrites?.idle();
-        await this.offlineStore.flush();
+        let failed = false;
+        let firstFailure: unknown;
+        const retainFailure = (results: PromiseSettledResult<unknown>[]) => {
+            const rejection = results.find((result): result is PromiseRejectedResult => result.status==='rejected');
+            if (rejection && !failed) { failed = true; firstFailure = rejection.reason; }
+        };
+        // A failed checkpoint must not release ownership while another accepted
+        // pipeline is still saving its blobs or journal transaction.
+        while (this.persistenceTasks?.size) {
+            retainFailure(await Promise.allSettled([...this.persistenceTasks]));
+        }
+        retainFailure(await Promise.allSettled([
+            this.documentSyncJournal?.flush(),
+            this.offlineStore.flush(),
+        ]));
+        if (failed) { throw firstFailure; }
     }
 
     private async loadDeferredSynchronizationQueue() {
@@ -5214,17 +5262,19 @@ export class VirtualFileSystem extends vscode.Disposable {
 
     public async persistTextDocumentDraft(uri: vscode.Uri, localText: string, baseText: string) {
         if (localText===baseText) { return; }
-        this.draftWrites ??= new AsyncQueue();
-        return this.draftWrites.run(async () => {
-            const relPath = this.toDocumentSyncRelPath(uri);
-            const localBlobId = await this.writeDocumentSyncBlob(Buffer.from(localText));
-            const baseBlobId = await this.writeDocumentSyncBlob(Buffer.from(baseText));
-            await this.updateDocumentSyncState('document_draft_persisted', {relPath}, state => {
-                const existing = state.records[relPath];
-                state.records[relPath] = {
-                    ...existing, relPath, localDirty: true, localBlobId,
-                    baseBlobId: existing?.localDirty && existing.baseBlobId ? existing.baseBlobId : baseBlobId,
-                };
+        return this.trackRecoveryMutation(async () => {
+            this.draftWrites ??= new AsyncQueue();
+            return this.draftWrites.run(async () => {
+                const relPath = this.toDocumentSyncRelPath(uri);
+                const localBlobId = await this.writeDocumentSyncBlob(Buffer.from(localText));
+                const baseBlobId = await this.writeDocumentSyncBlob(Buffer.from(baseText));
+                await this.updateDocumentSyncState('document_draft_persisted', {relPath}, state => {
+                    const existing = state.records[relPath];
+                    state.records[relPath] = {
+                        ...existing, relPath, localDirty: true, localBlobId,
+                        baseBlobId: existing?.localDirty && existing.baseBlobId ? existing.baseBlobId : baseBlobId,
+                    };
+                });
             });
         });
     }
@@ -5504,6 +5554,8 @@ export class VirtualFileSystem extends vscode.Disposable {
                         preservedRootDocId: previousRoot.rootDoc_id,
                         reason,
                     });
+                } else if (error instanceof StorageOwnershipError) {
+                    void vscode.window.showErrorMessage(error.message);
                 } else if (options.showReloadPrompt) {
                     vscode.window.showErrorMessage(
                         vscode.l10n.t('Connection lost: {serverName}', {serverName:this.serverName}),
@@ -8976,6 +9028,22 @@ export class RemoteFileSystemProvider implements vscode.FileSystemProvider {
 
     private readonly vfss = new Map<string, VirtualFileSystem>();
     private readonly pendingVfss = new Map<string, Promise<VirtualFileSystem>>();
+    private disposed = false;
+    private shutdownPromise?: Promise<void>;
+
+    shutdown(): Promise<void> {
+        this.shutdownPromise ??= (async () => {
+            this.disposed = true;
+            await Promise.allSettled([...this.pendingVfss.values()]);
+            const results = await Promise.allSettled([...this.vfss.values()].map(vfs => vfs.close()));
+            this.vfss.clear();
+            this.pendingVfss.clear();
+            this._emitter?.dispose();
+            const failure = results.find((result): result is PromiseRejectedResult => result.status==='rejected');
+            if (failure) { throw failure.reason; }
+        })();
+        return this.shutdownPromise;
+    }
 
     public async flushPendingWrites() {
         const results = await Promise.allSettled([...this.vfss.values()].map(vfs => vfs.flushOfflineProjectStatePersist()));
@@ -9140,6 +9208,7 @@ export class RemoteFileSystemProvider implements vscode.FileSystemProvider {
     }
 
     private async getVFS(uri: vscode.Uri): Promise<VirtualFileSystem> {
+        if (this.disposed) { throw vscode.FileSystemError.Unavailable('The extension is shutting down'); }
         this.compactDisposedVfsEntries();
         const scopeKey = this.resolveVfsScopeKey(uri);
         const vfs = this.vfss.get(scopeKey);
@@ -9151,7 +9220,11 @@ export class RemoteFileSystemProvider implements vscode.FileSystemProvider {
             return pendingVfs;
         }
         const creationPromise = VirtualFileSystem.create(this.context, uri, this.notify.bind(this))
-            .then((nextVfs) => {
+            .then(async (nextVfs) => {
+                if (this.disposed) {
+                    await nextVfs.close();
+                    throw vscode.FileSystemError.Unavailable('The extension is shutting down');
+                }
                 this.vfss.set(scopeKey, nextVfs);
                 logDiagnostic('RemoteFileSystemProvider', 'filesystem.vfs_created', {
                     projectId: nextVfs.projectId,
@@ -9177,6 +9250,7 @@ export class RemoteFileSystemProvider implements vscode.FileSystemProvider {
     }
 
     notify(events :vscode.FileChangeEvent[]) {
+        if (this.disposed) { return; }
         this._emitter.fire(events);
     }
 
@@ -9218,6 +9292,9 @@ export class RemoteFileSystemProvider implements vscode.FileSystemProvider {
 
     get triggers() {
         return [
+            new vscode.Disposable(() => {
+                void this.shutdown().catch(error => logDiagnostic('RemoteFileSystemProvider', 'filesystem.shutdown_failed', {}, error));
+            }),
             // register file system provider
             vscode.workspace.registerFileSystemProvider(ROOT_NAME, this, { isCaseSensitive: true }),
             // register commands

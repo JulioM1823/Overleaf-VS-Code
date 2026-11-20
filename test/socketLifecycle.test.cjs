@@ -6,7 +6,7 @@ const originalLoad = Module._load;
 Module._load = function(request,parent,main){
  if(request==='../comments/commentDiagnostics'){return {logCommentDiagnostics:()=>{}};}
  if(request==='vscode'){return {Disposable:class{constructor(fn){this.fn=fn;}dispose(){this.fn?.();}}};}
- if(parent?.filename?.endsWith('/api/socketio.js') && request==='./socketioAlt'){return {SocketIOAlt:class{}};}
+ if(parent?.filename?.replace(/\\/g, '/').endsWith('/api/socketio.js') && request==='./socketioAlt'){return {SocketIOAlt:class{}};}
  return originalLoad.call(this,request,parent,main);
 };
 const {SocketIOAPI}=require('../out/api/socketio');

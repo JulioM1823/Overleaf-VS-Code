@@ -44,6 +44,8 @@ export class DocumentSyncJournal {
         private readonly resolveStorage: () => Promise<DocumentSyncJournalStorage>,
     ) {}
 
+    async flush() { await this.transactions.idle(); }
+
     loadState(): Promise<PersistedDocumentSyncState> {
         return this.transactions.run(() => this.readState());
     }

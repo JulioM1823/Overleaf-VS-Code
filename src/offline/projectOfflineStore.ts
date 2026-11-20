@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
 import { AsyncQueue } from '../utils/asyncQueue';
 import { LatestTaskQueue } from '../utils/latestTaskQueue';
+import { StorageOwnership } from '../utils/storageOwnership';
 import * as vscode from 'vscode';
 import { assertSafeLocalPath, isMissingFile, writePrivateFile } from '../utils/safeFile';
 import { ProjectEntity } from '../core/remoteFileSystemProvider';
@@ -85,7 +86,22 @@ export class ProjectOfflineStore {
     });
     private readonly operationWrites = new AsyncQueue();
     private legacyStorageCheck?: Promise<void>;
+    private ownership?: Promise<StorageOwnership>;
+    private ownershipRoot?: string;
+    private closing?: Promise<void>;
+    private closed = false;
+    private assertAcceptingWork() {
+        if (this.closed || this.closing) { throw new Error('The project recovery store has been closed'); }
+    }
     async flush() { await Promise.all([this.projectWrites.idle(), this.operationWrites.idle()]); }
+    close(): Promise<void> {
+        this.closing ??= (async () => {
+            await this.flush();
+            this.closed = true;
+            await (await this.ownership)?.release();
+        })();
+        return this.closing;
+    }
     constructor(
         private readonly context: vscode.ExtensionContext,
         private readonly overleafUri: vscode.Uri,
@@ -95,6 +111,7 @@ export class ProjectOfflineStore {
     ) {}
 
     private async resolveStorage(): Promise<ResolvedProjectOfflineStorage> {
+        if (this.closed) { throw new Error('The project recovery store has been closed'); }
         const workspace = await resolveLocalReplicaWorkspaceForOverleafUri(this.overleafUri);
         const userId = new URLSearchParams(this.overleafUri.query).get('user');
         if (!userId) { throw new Error('Offline storage requires a project account identity'); }
@@ -106,6 +123,25 @@ export class ProjectOfflineStore {
             this.legacyStorageCheck ??= this.checkLegacyRecoveryState();
             await this.legacyStorageCheck;
         }
+        if (this.closed) { throw new Error('The project recovery store has been closed'); }
+        const rootKey = storageRoot.toString();
+        if (this.ownershipRoot && this.ownershipRoot!==rootKey) {
+            throw new Error('The project recovery location changed. Reopen the project before continuing; existing recovery data has been preserved.');
+        }
+        if (!this.ownership) {
+            this.ownershipRoot = rootKey;
+            const acquiring = (async () => {
+                if (storageRoot.scheme!=='file') { throw new Error('Project recovery requires a filesystem that supports exclusive writer ownership.'); }
+                await ensureLocalReplicaMetadataDirectory(storageRoot);
+                return StorageOwnership.acquire(storageRoot.fsPath);
+            })();
+            this.ownership = acquiring;
+            void acquiring.catch(() => {
+                if (this.ownership===acquiring) { this.ownership = undefined; this.ownershipRoot = undefined; }
+            });
+        }
+        await this.ownership;
+        if (this.closed) { throw new Error('The project recovery store has been closed'); }
         return {
             operationLogUri: vscode.Uri.joinPath(storageRoot, OFFLINE_OPERATION_LOG_FILE_NAME),
             snapshotUri: vscode.Uri.joinPath(storageRoot, OFFLINE_PROJECT_STATE_FILE_NAME),
@@ -138,14 +174,17 @@ export class ProjectOfflineStore {
     }
 
     async describeStorage() {
+        this.assertAcceptingWork();
         return this.resolveStorage();
     }
 
     async resolveStorageRoot() {
+        this.assertAcceptingWork();
         return (await this.resolveStorage()).storageRoot;
     }
 
     async loadProjectState(): Promise<PersistedOfflineProjectState | undefined> {
+        this.assertAcceptingWork();
         const {snapshotUri, storageRoot} = await this.resolveStorage();
         await assertSafeLocalPath(storageRoot, snapshotUri);
         try {
@@ -158,11 +197,13 @@ export class ProjectOfflineStore {
     }
 
     async saveProjectState(state: PersistedOfflineProjectState) {
+        this.assertAcceptingWork();
         const content = Buffer.from(serializePersistedOfflineProjectState(state));
         await this.projectWrites.enqueue(content);
     }
 
     async loadOperationQueue(): Promise<DeferredSyncQueueState> {
+        this.assertAcceptingWork();
         const {operationLogUri, storageRoot} = await this.resolveStorage();
         await assertSafeLocalPath(storageRoot, operationLogUri);
         try {
@@ -175,6 +216,7 @@ export class ProjectOfflineStore {
     }
 
     async saveOperationQueue(queue: DeferredSyncQueueState) {
+        this.assertAcceptingWork();
         const content = Buffer.from(serializeDeferredSyncQueueState(queue));
         await this.operationWrites.run(async () => {
             const {storageRoot, operationLogUri} = await this.resolveStorage();

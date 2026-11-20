@@ -228,12 +228,15 @@ export class MisspellingCheckProvider extends IntellisenseProvider implements vs
     }
 
     async spellCheckSettings() {
-        const uri = vscode.workspace.workspaceFolders?.[0].uri;
+        const activeUri = vscode.window.activeTextEditor?.document.uri;
+        const uri = activeUri?.scheme===ROOT_NAME
+            ? activeUri
+            : vscode.workspace.workspaceFolders?.find(folder => folder.uri.scheme===ROOT_NAME)?.uri;
         const vfs = uri && await this.vfsm.prefetch(uri);
         if (!vfs) { return; }
         const currentLanguage = vfs.getSpellCheckLanguage();
         const items: (vscode.QuickPickItem & {id?:string})[] = [
-            {id:'dictionary', label:vscode.l10n.t('Manage Dictionary'), iconPath:new vscode.ThemeIcon('book')},
+            {id:'dictionary', label:vscode.l10n.t('Manage Dictionary')},
             {label:'', kind:vscode.QuickPickItemKind.Separator},
             ...(vfs.getAllSpellCheckLanguages()||[]).map(item => ({label:item.name, description:item.code, picked:item.code===currentLanguage?.code})),
         ];

@@ -14,10 +14,14 @@ jobs:
       - run: npm ci && npm ci --prefix views/chat-view
       - run: npm test
       - run: npx --yes @vscode/vsce@4.1.0 package --out orbitleaf.vsix
+      - name: Verify the installed artifact before publication
+        run: xvfb-run -a node scripts/run-release-compat.cjs orbitleaf.vsix stable
       - uses: actions/upload-artifact@v4
         with:
           name: orbitleaf-vsix
-          path: orbitleaf.vsix
+          path: |
+            orbitleaf.vsix
+            output/release-audit/*.json
       - name: Publish the packaged file
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}

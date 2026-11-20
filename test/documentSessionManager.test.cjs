@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const Module = require('node:module');
 
 const noop = () => {};
+const pendingManagedUris = new Set();
 const originalLoad = Module._load;
 const projectWorkspaceBindingMock = {
     isPotentialProjectWorkspaceUri: () => true,
@@ -56,9 +57,9 @@ Module._load = function patchedLoad(request, parent, isMain) {
     if (request==='./liveTextDocumentRegistry' && parent?.id?.endsWith('/documentSessionManager.js')) {
         return {
             clearManagedDocumentSession: noop,
-            clearManagedDocumentUri: noop,
+            clearManagedDocumentUri: uri => pendingManagedUris.delete(uri.toString()),
             linkManagedDocumentUri: noop,
-            markManagedDocumentPending: noop,
+            markManagedDocumentPending: uri => pendingManagedUris.add(uri.toString()),
             setManagedDocumentSessionState: noop,
         };
     }
@@ -1204,4 +1205,45 @@ test('remote-operation preflight waits for queued editor updates before consider
     f.session.remoteUpdateQueue={idle:()=>new Promise(resolve=>{release=()=>{drained=true;f.session.pendingRemoteUpdates=0;resolve();};})};
     const pending=f.manager.drainSessionForRemoteOperation(f.session,'compile');await new Promise(resolve=>setImmediate(resolve));
     assert.equal(drained,false);release();await pending;assert.equal(drained,true);
+});
+
+test('failed document attachment clears the pending marker instead of suppressing replica sync forever', async () => {
+    const manager = new DocumentSessionManager({});
+    const document = {uri: createUri('file:///failed-attach/main.tex'), getText: () => 'draft'};
+    manager.resolveBinding = async () => { throw new Error('join failed'); };
+    await assert.rejects(manager.attachDocument(document, 'open'), /join failed/);
+    assert.equal(pendingManagedUris.has(document.uri.toString()), false);
+    assert.equal(manager.sessions.size, 0);
+});
+
+test('closing an editor during an asynchronous join cannot resurrect its document session', async () => {
+    const manager = new DocumentSessionManager({});
+    const document = {uri: createUri('file:///closed-attach/main.tex'), isClosed: false, getText: () => 'base'};
+    let finish;
+    manager.resolveBinding = () => new Promise(resolve => { finish = resolve; });
+    const pending = manager.attachDocument(document, 'open');
+    document.isClosed = true;
+    manager.detachDocument(document);
+    finish({docId: 'closed', localText: 'base', remoteText: 'base', overleafUri: document.uri,
+        sessionKey: 'closed::doc', status: 'live', usesLocalReplica: false,
+        vfs: {origin: {toString: () => 'closed'}}});
+    assert.equal(await pending, undefined);
+    assert.equal(manager.sessions.size, 0);
+    assert.equal(manager.sessionKeyByDocumentUri.size, 0);
+    assert.equal(pendingManagedUris.has(document.uri.toString()), false);
+});
+
+test('a delayed first-change attachment processes current editor text rather than an earlier captured event', async () => {
+    const manager = new DocumentSessionManager({});
+    let text = 'first keystroke';
+    const document = {uri: createUri('file:///delayed-change/main.tex'), getText: () => text};
+    let finish;
+    manager.attachDocument = () => new Promise(resolve => { finish = resolve; });
+    const processed = [];
+    manager.processSessionDocumentChange = async (_session, value) => { processed.push(value); };
+    const pending = manager.handleDocumentChanged(document);
+    text = 'newest editor text';
+    finish({});
+    await pending;
+    assert.deepEqual(processed, ['newest editor text']);
 });

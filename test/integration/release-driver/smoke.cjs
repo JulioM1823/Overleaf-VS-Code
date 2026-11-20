@@ -29,6 +29,10 @@ exports.run = async () => {
     const report = {
         status: 'running',
         vscodeVersion: vscode.version,
+        nodeVersion: process.versions.node,
+        electronVersion: process.versions.electron,
+        platform: process.platform,
+        arch: process.arch,
         authenticatedProjectWorkflow: 'not-run: this clean profile has no Overleaf credentials; no existing sessions were copied',
         pdfRendering: 'not-run: the custom PDF editor requires an authenticated overleaf-workshop: resource',
         checks: [],

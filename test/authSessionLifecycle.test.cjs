@@ -7,7 +7,7 @@ const warnings=[];
 Module._load=function(request,parent,main) {
     if (request==='vscode') return {workspace:{getConfiguration:()=>({get:(_key,fallback)=>fallback})},
         window:{showWarningMessage:message=>warnings.push(message),showErrorMessage:()=>{}},l10n:{t:message=>message}};
-    if (parent?.filename.endsWith('/utils/globalStateManager.js')) {
+    if (parent?.filename.replace(/\\/g, '/').endsWith('/utils/globalStateManager.js')) {
         if (request==='../api/socketio' || request==='../api/extendedBase') return {};
         if (request==='./eventBus') return {EventBus:{fire:(name,payload)=>events.push({name,payload})}};
     }

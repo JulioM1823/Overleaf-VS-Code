@@ -146,8 +146,8 @@ function isLocalReplicaWorkspaceSettings(candidate: unknown): candidate is Local
         && maybeSettings.uri.length > 0;
 }
 
-function containsFileUri(workspaceRoot: vscode.Uri, uri: vscode.Uri) {
-    if (workspaceRoot.scheme!=='file' || uri.scheme!=='file') {
+export function containsLocalReplicaFileUri(workspaceRoot: vscode.Uri, uri: vscode.Uri) {
+    if (workspaceRoot.scheme!=='file' || uri.scheme!=='file' || workspaceRoot.authority!==uri.authority) {
         return false;
     }
     if (workspaceRoot.path===uri.path) {
@@ -234,7 +234,7 @@ export async function resolveLocalReplicaWorkspaceForFileUri(
 
     const candidateFolders = (workspaceFolders ?? [])
         .map((folder) => folder.uri)
-        .filter((workspaceRoot) => containsFileUri(workspaceRoot, uri))
+        .filter((workspaceRoot) => containsLocalReplicaFileUri(workspaceRoot, uri))
         .sort((left, right) => right.path.length - left.path.length);
 
     for (const workspaceRoot of candidateFolders) {

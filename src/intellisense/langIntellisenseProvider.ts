@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import { ROOT_NAME } from '../consts';
 import { RemoteFileSystemProvider } from '../core/remoteFileSystemProvider';
 import { EventBus } from '../utils/eventBus';
+import { logDiagnostic } from '../utils/diagnostics';
+import { toOverleafProjectIdentityKey } from '../core/projectWorkspaceBindingHelpers';
 
 import { IntellisenseProvider } from '.';
 import { TexDocumentSymbolProvider } from './texDocumentSymbolProvider';
@@ -14,6 +16,8 @@ export class LangIntellisenseProvider {
     private static readonly STATUS_REFRESH_DEBOUNCE_MS = 50;
     private status: vscode.StatusBarItem;
     private statusRefreshTimer?: NodeJS.Timeout;
+    private statusRefreshRevision = 0;
+    private disposed = false;
     private providers: IntellisenseProvider[];
     private readonly projectSearchProvider: ProjectSearchProvider;
 
@@ -34,33 +38,73 @@ export class LangIntellisenseProvider {
         ];
         this.projectSearchProvider = new ProjectSearchProvider(vfsm);
         this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, -2);
-        // Enable CSpell
-        const config = vscode.workspace.getConfiguration("cSpell");
-        const enabledSchemes = config.get<Record<string, boolean>>("enabledSchemes") || {}; 
-        enabledSchemes[ROOT_NAME] = true; 
-        config.update("enabledSchemes", enabledSchemes, vscode.ConfigurationTarget.Global);
+        void this.enableOptionalCSpellIntegration();
         
         this.scheduleStatusRefresh('constructor_initialized');
     }
 
+    private async enableOptionalCSpellIntegration() {
+        try {
+            const config = vscode.workspace.getConfiguration('cSpell');
+            // CSpell is optional. Writing an unregistered setting fails in a
+            // fresh profile, and policy or filesystem permissions can also
+            // prevent updates even when the setting is registered.
+            if (!config.has('enabledSchemes')) { return; }
+            const enabledSchemes = config.get<unknown>('enabledSchemes');
+            let updatedSchemes: string[] | Record<string, unknown>;
+            if (Array.isArray(enabledSchemes) && enabledSchemes.every(item => typeof item==='string')) {
+                if (enabledSchemes.includes(ROOT_NAME)) { return; }
+                updatedSchemes = [...enabledSchemes, ROOT_NAME];
+            } else if (enabledSchemes && typeof enabledSchemes==='object' && !Array.isArray(enabledSchemes)) {
+                if ((enabledSchemes as Record<string, unknown>)[ROOT_NAME]===true) { return; }
+                updatedSchemes = {...enabledSchemes, [ROOT_NAME]:true};
+            } else { return; }
+            await config.update('enabledSchemes', updatedSchemes, vscode.ConfigurationTarget.Global);
+        } catch (error) {
+            logDiagnostic('Intellisense', 'cspell.configuration_update_failed', {}, error);
+        }
+    }
+
     private scheduleStatusRefresh(reason: string) {
+        if (this.disposed) { return; }
+        const revision = ++this.statusRefreshRevision;
         if (this.statusRefreshTimer) {
             clearTimeout(this.statusRefreshTimer);
         }
         this.statusRefreshTimer = setTimeout(() => {
             this.statusRefreshTimer = undefined;
-            void this.refreshStatus(reason);
+            void this.refreshStatus(reason, revision).catch(error => {
+                if (!this.disposed && revision===this.statusRefreshRevision) { this.status.hide(); }
+                logDiagnostic('Intellisense', 'status.refresh_failed', {reason}, error);
+            });
         }, LangIntellisenseProvider.STATUS_REFRESH_DEBOUNCE_MS);
     }
 
-    private async refreshStatus(_reason: string) {
-        const uri = vscode.workspace.workspaceFolders?.[0].uri;
+    private getStatusProjectUri() {
+        const activeUri = vscode.window.activeTextEditor?.document.uri;
+        return activeUri?.scheme===ROOT_NAME
+            ? activeUri
+            : vscode.workspace.workspaceFolders?.find(folder => folder.uri.scheme===ROOT_NAME)?.uri;
+    }
+
+    private matchesStatusProjectOrigin(origin: string) {
+        const uri = this.getStatusProjectUri();
+        if (!uri) { return false; }
+        try {
+            return toOverleafProjectIdentityKey(uri)===toOverleafProjectIdentityKey(vscode.Uri.parse(origin));
+        } catch { return false; }
+    }
+
+    private async refreshStatus(_reason: string, revision = ++this.statusRefreshRevision) {
+        if (this.disposed) { return; }
+        const uri = this.getStatusProjectUri();
         if (uri?.scheme!==ROOT_NAME) {
             this.status.hide();
             return;
         }
 
         const vfs = uri && await this.vfsm.prefetch(uri);
+        if (this.disposed || revision!==this.statusRefreshRevision) { return; }
         const languageItem = vfs?.getSpellCheckLanguage();
         if (languageItem) {
             const {name, code} = languageItem;
@@ -78,6 +122,8 @@ export class LangIntellisenseProvider {
         return [
             this.status,
             new vscode.Disposable(() => {
+                this.disposed = true;
+                this.statusRefreshRevision++;
                 if (this.statusRefreshTimer) {
                     clearTimeout(this.statusRefreshTimer);
                 }
@@ -89,15 +135,13 @@ export class LangIntellisenseProvider {
                 this.scheduleStatusRefresh('spellcheck_language_updated');
             }),
             EventBus.on('offlineSynchronizationStateChangedEvent', ({origin}) => {
-                const workspaceOrigin = vscode.workspace.workspaceFolders?.[0]?.uri.toString();
-                if (workspaceOrigin!==origin) {
+                if (!this.matchesStatusProjectOrigin(origin)) {
                     return;
                 }
                 this.scheduleStatusRefresh('offline_sync_state_changed');
             }),
             EventBus.on('realtimeConnectionStateChangedEvent', ({origin}) => {
-                const workspaceOrigin = vscode.workspace.workspaceFolders?.[0]?.uri.toString();
-                if (workspaceOrigin!==origin) {
+                if (!this.matchesStatusProjectOrigin(origin)) {
                     return;
                 }
                 this.scheduleStatusRefresh('realtime_connection_state_changed');

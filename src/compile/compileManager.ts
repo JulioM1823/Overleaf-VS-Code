@@ -8,7 +8,11 @@ import { PdfDocument } from '../core/pdfViewEditorProvider';
 import { LatexParser, ErrorSchema } from './compileLogParser';
 import { EventBus } from '../utils/eventBus';
 import { logDiagnostic, registerDiagnosticStateProvider, startDiagnosticSpan } from '../utils/diagnostics';
-import { LocalReplicaSCMProvider } from '../scm/localReplicaSCM';
+import {
+    resolveActiveProjectWorkspaceBinding,
+    resolveProjectDocumentBinding,
+    resolveProjectWorkspaceBindingForUri,
+} from '../core/projectWorkspaceBinding';
 import { resolveCompileRenderStatus, CompileRenderStatus, CompileTerminalStatus } from './compileStatus';
 import {
     isCompileLogArtifact,
@@ -27,11 +31,7 @@ const severityMap: Record<string, vscode.DiagnosticSeverity> = {
 // Match the document class in the tex file
 const documentClassRegex = new RegExp(/\\documentclass(?:\[[^\[\]\{\}]*\])?\{([^\[\]\{\}]+)\}/);
 
-const pdfViewRecord: {
-    [key: string]: {
-        [key: string]: { doc: PdfDocument, webviewPanel: vscode.WebviewPanel }
-    }
-} = {};
+type PdfViewRecord = {doc: PdfDocument, webviewPanel: vscode.WebviewPanel};
 
 type CompileInvocationSource = 'automatic' | 'command' | 'save';
 
@@ -46,15 +46,9 @@ interface QueuedCompileRequest {
     options: CompileInvocationOptions,
 }
 
-function unregisterPdfViewRecord(identifier: string, filePath: string) {
-    if (!pdfViewRecord[identifier]) {
-        return false;
-    }
-    delete pdfViewRecord[identifier][filePath];
-    if (Object.keys(pdfViewRecord[identifier]).length===0) {
-        delete pdfViewRecord[identifier];
-    }
-    return true;
+function pdfProjectKey(uri: vscode.Uri) {
+    const {serverName, userId, projectId} = parseUri(uri);
+    return JSON.stringify([serverName, userId, projectId]);
 }
 
 class CompileDiagnosticProvider {
@@ -240,6 +234,8 @@ export class CompileManager {
     private static readonly COMPILE_REQUEST_TIMEOUT_MS = 60_000;
     readonly status: vscode.StatusBarItem;
     public inCompiling: boolean = false;
+    private compileRequestActive = false;
+    private disposed = false;
     private diagnosticProvider: CompileDiagnosticProvider;
     private compileAsDraft: boolean = false;
     private compileStopOnFirstError: boolean = false;
@@ -250,6 +246,9 @@ export class CompileManager {
     private lastTerminalStatus: CompileTerminalStatus = 'success';
     private statusRenderRevision = 0;
     private readonly diagnosticsStateRegistration: {dispose: () => void};
+    private readonly pdfViewRecord: Record<string, Record<string, PdfViewRecord>> = Object.create(null);
+    private readonly pdfViewSubscriptions = new Set<vscode.Disposable>();
+    private readonly pdfOpenSubscription: vscode.Disposable;
 
     constructor(
         private vfsm: RemoteFileSystemProvider,
@@ -264,23 +263,29 @@ export class CompileManager {
             () => this.collectDiagnosticsState(),
         );
         // listen pdf open event
-        EventBus.on('pdfWillOpenEvent', ({uri, doc, webviewPanel}) => {
+        this.pdfOpenSubscription = EventBus.on('pdfWillOpenEvent', ({uri, doc, webviewPanel}) => {
             const {identifier,pathParts} = parseUri(uri);
+            const projectKey = pdfProjectKey(uri);
             const filePath = pathParts.join('/');
-            const replacedExisting = Boolean(pdfViewRecord[identifier]?.[filePath]);
-            if (pdfViewRecord[identifier]) {
-                pdfViewRecord[identifier][filePath] = {doc, webviewPanel};
-            } else {
-                pdfViewRecord[identifier] = {[filePath]:{doc, webviewPanel}};
-            }
+            const records = this.pdfViewRecord[projectKey] ?? Object.create(null);
+            const record = {doc, webviewPanel};
+            const replacedExisting = Boolean(records[filePath]);
+            records[filePath] = record;
+            this.pdfViewRecord[projectKey] = records;
             this.logDiagnostic('pdf_view.registered', {
                 filePath,
                 identifier,
                 replacedExisting,
                 uri: uri.toString(),
             });
-            webviewPanel.onDidDispose(() => {
-                const removed = unregisterPdfViewRecord(identifier, filePath);
+            const subscription = webviewPanel.onDidDispose(() => {
+                // A closing old panel must not remove its replacement.
+                const removed = this.pdfViewRecord[projectKey]?.[filePath]===record;
+                if (removed) {
+                    delete records[filePath];
+                    if (Object.keys(records).length===0) { delete this.pdfViewRecord[projectKey]; }
+                }
+                this.pdfViewSubscriptions.delete(subscription);
                 this.logDiagnostic('pdf_view.disposed', {
                     filePath,
                     identifier,
@@ -288,6 +293,7 @@ export class CompileManager {
                     uri: uri.toString(),
                 });
             });
+            this.pdfViewSubscriptions.add(subscription);
         });
     }
 
@@ -296,7 +302,7 @@ export class CompileManager {
     }
 
     private collectPdfViewDiagnosticsState() {
-        return Object.entries(pdfViewRecord)
+        return Object.entries(this.pdfViewRecord)
             .sort(([left], [right]) => left.localeCompare(right))
             .slice(0, 20)
             .map(([identifier, views]) => ({
@@ -313,6 +319,7 @@ export class CompileManager {
             compileAsDraft: this.compileAsDraft,
             compileStopOnFirstError: this.compileStopOnFirstError,
             inCompiling: this.inCompiling,
+            compileRequestActive: this.compileRequestActive,
             lastTerminalStatus: this.lastTerminalStatus,
             pendingCompileOnSaveScheduled: Boolean(this.compileOnSaveTimer),
             pendingCompileOnSaveUri: this.pendingCompileOnSaveUri?.toString() ?? '',
@@ -326,26 +333,23 @@ export class CompileManager {
                 : null,
             pendingCompileRetryScheduled: Boolean(this.pendingCompileRetryTimer),
             pdfViewCount: pdfViews.reduce((count, project) => count + project.viewCount, 0),
-            pdfViewProjectCount: Object.keys(pdfViewRecord).length,
+            pdfViewProjectCount: Object.keys(this.pdfViewRecord).length,
             pdfViews,
             statusRenderRevision: this.statusRenderRevision,
         };
     }
 
     static async check(uri?: vscode.Uri) {
-        // check if supported vfs
-        uri = uri || vscode.window.activeTextEditor?.document.uri;
-        uri = uri || vscode.workspace.workspaceFolders?.[0].uri;
-        if (uri?.scheme === ROOT_NAME) {
-            return uri;
+        const targetUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+        if (targetUri?.scheme===ROOT_NAME) { return targetUri; }
+        if (targetUri) {
+            const binding = await resolveProjectDocumentBinding(targetUri);
+            if (binding) { return binding.overleafUri; }
+            // An explicit save/compile target outside a linked replica must
+            // never fall through to a different project's workspace settings.
+            if (uri) { return undefined; }
         }
-        // check if supported local replica
-        const localSetting = await LocalReplicaSCMProvider.readSettings();
-        if (localSetting?.uri) {
-            return vscode.Uri.parse(localSetting.uri);
-        }
-        // otherwise return undefined
-        return undefined;
+        return (await resolveActiveProjectWorkspaceBinding())?.overleafProjectUri;
     }
 
     private rememberCompileStatus(status?: CompileTerminalStatus | 'compiling') {
@@ -411,8 +415,7 @@ export class CompileManager {
         if (targetUri?.scheme!=='file') {
             return false;
         }
-        const localReplicaSettings = await LocalReplicaSCMProvider.readSettings();
-        return localReplicaSettings?.uri !== undefined;
+        return (await resolveProjectWorkspaceBindingForUri(targetUri))?.mode==='localReplica';
     }
 
     private shouldSaveAllBeforeCompile(targetUri?: vscode.Uri) {
@@ -423,19 +426,32 @@ export class CompileManager {
     }
 
     private async tryOfflineLocalReplicaCompileFallback(targetUri?: vscode.Uri) {
-        const fallbackUri = targetUri ?? vscode.workspace.workspaceFolders?.[0]?.uri;
-        if (fallbackUri?.scheme!=='file') {
-            return false;
-        }
-
-        const localReplicaSettings = await LocalReplicaSCMProvider.readSettings();
-        if (!localReplicaSettings?.uri) {
-            return false;
+        if (this.disposed) { return false; }
+        const binding = targetUri
+            ? await resolveProjectWorkspaceBindingForUri(targetUri)
+            : await resolveActiveProjectWorkspaceBinding();
+        if (binding?.mode!=='localReplica') { return false; }
+        const activeUri = vscode.window.activeTextEditor?.document.uri;
+        if (activeUri) {
+            const activeBinding = await resolveProjectWorkspaceBindingForUri(activeUri);
+            if (activeBinding?.mode!=='localReplica'
+                || activeBinding.workspaceRootUri?.toString()!==binding.workspaceRootUri?.toString()) { return false; }
+        } else {
+            const folders = vscode.workspace.workspaceFolders ?? [];
+            if (folders.length!==1 || folders[0].uri.toString()!==binding.workspaceRootUri?.toString()) { return false; }
         }
 
         const availableCommands = await vscode.commands.getCommands(true);
+        if (this.disposed) { return false; }
         if (!availableCommands.includes('latex-workshop.build')) {
             return false;
+        }
+        // LaTeX Workshop's build command takes no target URI. Do not invoke
+        // its active-project build after an editor switch during discovery.
+        if (activeUri?.toString()!==vscode.window.activeTextEditor?.document.uri.toString()) { return false; }
+        if (!activeUri) {
+            const folders = vscode.workspace.workspaceFolders ?? [];
+            if (folders.length!==1 || folders[0].uri.toString()!==binding.workspaceRootUri?.toString()) { return false; }
         }
 
         await vscode.commands.executeCommand('latex-workshop.build');
@@ -462,6 +478,7 @@ export class CompileManager {
     }
 
     private queueCompileRequest(force: boolean, options: CompileInvocationOptions, reason: string, retryDelayMs = 0) {
+        if (this.disposed) { return; }
         const existing = this.pendingCompileRequest;
         this.pendingCompileRequest = {
             force: existing?.force === true || force,
@@ -482,6 +499,7 @@ export class CompileManager {
     }
 
     private schedulePendingCompileRequestDrain() {
+        if (this.disposed) { return; }
         if (!this.pendingCompileRequest) {
             if (this.pendingCompileRetryTimer) {
                 clearTimeout(this.pendingCompileRetryTimer);
@@ -495,12 +513,14 @@ export class CompileManager {
         const delayMs = Math.max(0, this.pendingCompileRequest.notBefore - Date.now());
         this.pendingCompileRetryTimer = setTimeout(() => {
             this.pendingCompileRetryTimer = undefined;
-            void this.drainPendingCompileRequest('timer');
+            void this.drainPendingCompileRequest('timer').catch(error => {
+                this.logDiagnostic('compile.request_drain_failed', {}, error);
+            });
         }, delayMs);
     }
 
     private async drainPendingCompileRequest(trigger: string) {
-        if (this.inCompiling || !this.pendingCompileRequest) {
+        if (this.disposed || this.compileRequestActive || this.inCompiling || !this.pendingCompileRequest) {
             return false;
         }
         if (this.pendingCompileRequest.notBefore > Date.now()) {
@@ -541,6 +561,7 @@ export class CompileManager {
     }
 
     private scheduleCompileOnSave(uri: vscode.Uri) {
+        if (this.disposed) { return; }
         this.pendingCompileOnSaveUri = uri;
         if (this.compileOnSaveTimer) {
             clearTimeout(this.compileOnSaveTimer);
@@ -559,7 +580,7 @@ export class CompileManager {
             void this.compile(false, {
                 source: 'save',
                 targetUri,
-            });
+            }).catch(error => this.logDiagnostic('compile.save_failed', {uri:targetUri.toString()}, error));
         }, CompileManager.SAVE_TRIGGER_COMPILE_DEBOUNCE_MS);
     }
 
@@ -641,6 +662,7 @@ export class CompileManager {
     }
 
     async update(status?: 'success'|'compiling'|'failed'|'alert') {
+        if (this.disposed) { return undefined; }
         const renderRevision = ++this.statusRenderRevision;
         this.rememberCompileStatus(status);
         const uri = await CompileManager.check();
@@ -708,7 +730,7 @@ export class CompileManager {
 
     private refreshPdfViews(uri: vscode.Uri) {
         const { identifier } = parseUri(uri);
-        const pdfViews = pdfViewRecord[identifier] ? Object.values(pdfViewRecord[identifier]) : [];
+        const pdfViews = Object.values(this.pdfViewRecord[pdfProjectKey(uri)] ?? {});
         this.logDiagnostic('pdf_view.refresh_requested', {
             identifier,
             viewCount: pdfViews.length,
@@ -732,8 +754,8 @@ export class CompileManager {
         };
     }
 
-    private getPdfViewRecord(identifier: string, preferredPdfPath?: string) {
-        const records = pdfViewRecord[identifier];
+    private getPdfViewRecord(projectKey: string, preferredPdfPath?: string) {
+        const records = this.pdfViewRecord[projectKey];
         if (!records) {
             return undefined;
         }
@@ -749,18 +771,36 @@ export class CompileManager {
     }
 
     async compile(force:boolean=false, options: CompileInvocationOptions = {}) {
+        if (this.disposed) { return; }
         const source = options.source ?? 'command';
         const requestedTargetUri = this.getRequestedCompileTargetUri(options);
-        if (this.inCompiling) {
+        if (this.compileRequestActive || this.inCompiling) {
             this.logDiagnostic('compile.command.skipped_busy', {
                 force,
                 source,
             });
             if (this.shouldQueueCompileRequest(source)) {
-                this.queueCompileRequest(force, options, 'busy');
+                this.queueCompileRequest(force, {...options, targetUri:requestedTargetUri}, 'busy');
             }
             return;
         }
+        // Admission covers saved-file preparation, workspace discovery and
+        // asynchronous preflight, before the remote compiling status is set.
+        this.compileRequestActive = true;
+        try { await this.compileOnce(force, options, requestedTargetUri); }
+        finally {
+            this.compileRequestActive = false;
+            this.schedulePendingCompileRequestDrain();
+        }
+    }
+
+    private async compileOnce(force: boolean, options: CompileInvocationOptions, requestedTargetUri?: vscode.Uri) {
+        const source = options.source ?? 'command';
+        if (!options.targetUri && !vscode.window.activeTextEditor?.document.uri) {
+            const binding = await resolveActiveProjectWorkspaceBinding();
+            requestedTargetUri = binding?.workspaceRootUri ?? binding?.overleafProjectUri ?? requestedTargetUri;
+        }
+        if (this.disposed) { return; }
         if (this.shouldSaveAllBeforeCompile(requestedTargetUri)) {
             await vscode.workspace.saveAll(); // Local builds require saved files on disk.
         } else {
@@ -771,6 +811,7 @@ export class CompileManager {
         }
 
         const shouldPreferLocalReplicaCompile = await this.shouldPreferLocalReplicaCompileTarget(requestedTargetUri);
+        if (this.disposed) { return; }
         if (shouldPreferLocalReplicaCompile) {
             const usedLocalReplicaBuild = await this.tryOfflineLocalReplicaCompileFallback(requestedTargetUri);
             if (usedLocalReplicaBuild) {
@@ -784,7 +825,8 @@ export class CompileManager {
             }
         }
 
-        const uri = await CompileManager.check(options.targetUri);
+        const uri = await CompileManager.check(requestedTargetUri);
+        if (this.disposed) { return; }
         if (!uri) {
             this.logDiagnostic('compile.command.skipped_no_uri', {
                 force,
@@ -814,14 +856,17 @@ export class CompileManager {
         let activeVfs: VirtualFileSystem | undefined;
         let compileTimedOut = false;
         const assertCompileStillActive = () => {
+            if (this.disposed) { throw new Error('Compile pipeline cancelled after disposal'); }
             if (compileTimedOut) {
                 throw new Error('Compile pipeline cancelled after timeout');
             }
         };
         try {
             const preflight = await this.prepareForRemoteCompile(uri);
+            if (this.disposed) { compileSpan.end({outcome:'disposed'}); return; }
             if (preflight==='blocked') {
                 const blockedProjectVfs = await this.vfsm.prefetch(uri).catch(() => undefined);
+                if (this.disposed) { compileSpan.end({outcome:'disposed'}); return; }
                 const blockedByOfflineMode = blockedProjectVfs?.isOfflineMode===true;
                 if (source==='command' && blockedByOfflineMode) {
                     const usedLocalFallback = await this.tryOfflineLocalReplicaCompileFallback(requestedTargetUri);
@@ -845,7 +890,7 @@ export class CompileManager {
                         ? vscode.l10n.t('Overleaf server compilation is unavailable while offline. Reconnect to compile on Overleaf, or use a local LaTeX build in the local replica.')
                         : vscode.l10n.t('Overleaf is still synchronizing open documents. Please wait a moment and try again.'));
                 } else if (this.shouldQueueCompileRequest(source)) {
-                    this.queueCompileRequest(force, options, 'blocked_preflight', CompileManager.COMPILE_RETRY_DELAY_MS);
+                    this.queueCompileRequest(force, {...options, targetUri:requestedTargetUri}, 'blocked_preflight', CompileManager.COMPILE_RETRY_DELAY_MS);
                 }
                 this.logDiagnostic(source==='command'
                     ? 'compile.command.blocked_preflight'
@@ -963,6 +1008,7 @@ export class CompileManager {
                     return;
             }
         } catch (error) {
+            if (this.disposed) { compileSpan.end({outcome:'disposed'}); return; }
             if (this.isCompileTimeoutError(error)) {
                 if (compileResult!==true) {
                     try {
@@ -1120,7 +1166,8 @@ export class CompileManager {
                     return;
                 }
                 const pdfPath = vfs.getPrimaryPdfOutputPath();
-                const pdfViewRecordEntry = this.getPdfViewRecord(identifier, pdfPath);
+                const projectKey = pdfProjectKey(uri);
+                const pdfViewRecordEntry = this.getPdfViewRecord(projectKey, pdfPath);
                 this.logDiagnostic('sync_code.result_received', {
                     filePath,
                     highlightCount: res.pdf?.length ?? 0,
@@ -1129,7 +1176,7 @@ export class CompileManager {
                 });
                 if (!pdfViewRecordEntry) {
                     this.logDiagnostic('sync_code.pdf_view_missing', {
-                        availablePdfViewCount: Object.keys(pdfViewRecord[identifier] ?? {}).length,
+                        availablePdfViewCount: Object.keys(this.pdfViewRecord[projectKey] ?? {}).length,
                         filePath,
                         identifier,
                         pdfPath: pdfPath ?? '',
@@ -1158,7 +1205,7 @@ export class CompileManager {
     }
 
     private _revealSelectionInEditor(editor: vscode.TextEditor, targetLine: number, identifier: string) {
-        const _identifier = identifier.replace(/\s+/g, '\\s+');
+        const _identifier = identifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
         // targetLine is 1-based from the syncTeX result
         const lineIndex = targetLine - 1;
 
@@ -1362,26 +1409,42 @@ export class CompileManager {
             vscode.commands.registerCommand(`${ROOT_NAME}.compileManager.setRootDoc`, () => this.setRootDoc()),
             // register compile conditions
             vscode.workspace.onDidSaveTextDocument(async (e) => {
-                const projectUri = await CompileManager.check(e.uri);
-                const vfs = projectUri && await this.vfsm.prefetch(projectUri);
-                const compileCondition = vscode.workspace.getConfiguration(`${ROOT_NAME}.compileOnSave`).get('enabled', true);
-                const postfixCondition = e.fileName.match(/\.tex$|\.sty$|\.cls$|\.bib$/i);
-                if (projectUri && compileCondition && postfixCondition && vfs) {
-                    this.scheduleCompileOnSave(e.uri);
-                }
+                try {
+                    if (this.disposed) { return; }
+                    const projectUri = await CompileManager.check(e.uri);
+                    if (this.disposed) { return; }
+                    const vfs = projectUri && await this.vfsm.prefetch(projectUri);
+                    const compileCondition = vscode.workspace.getConfiguration(`${ROOT_NAME}.compileOnSave`).get('enabled', true);
+                    const postfixCondition = e.fileName.match(/\.tex$|\.sty$|\.cls$|\.bib$/i);
+                    if (projectUri && compileCondition && postfixCondition && vfs) {
+                        this.scheduleCompileOnSave(e.uri);
+                    }
+                } catch (error) { this.logDiagnostic('compile.save_preparation_failed', {uri:e.uri.toString()}, error); }
             }),
             EventBus.on('compilerUpdateEvent', () => {
-                this.compile(true, {source: 'automatic'});
+                void this.compile(true, {source: 'automatic'})
+                    .catch(error => this.logDiagnostic('compile.automatic_failed', {reason:'compiler_updated'}, error));
             }),
             EventBus.on('rootDocUpdateEvent', () => {
-                this.compile(true, {source: 'automatic'});
+                void this.compile(true, {source: 'automatic'})
+                    .catch(error => this.logDiagnostic('compile.automatic_failed', {reason:'root_updated'}, error));
             }),
-            {dispose: () => this.clearPendingCompileOnSave()},
+            this.pdfOpenSubscription,
+            {dispose: () => {
+                this.disposed = true;
+                this.statusRenderRevision++;
+                this.inCompiling = false;
+                this.clearPendingCompileOnSave();
+                this.pdfViewSubscriptions.forEach(subscription => subscription.dispose());
+                this.pdfViewSubscriptions.clear();
+                for (const projectKey of Object.keys(this.pdfViewRecord)) { delete this.pdfViewRecord[projectKey]; }
+            }},
             this.diagnosticsStateRegistration,
             EventBus.on('realtimeConnectionStateChangedEvent', ({origin, phase, projectId, reason, retryConnection, serverName}) => {
                 void (async () => {
+                    if (this.disposed) { return; }
                     const uri = await CompileManager.check();
-                    if (!uri || !this.isUriWithinConnectionOrigin(uri, origin)) {
+                    if (this.disposed || !uri || !this.isUriWithinConnectionOrigin(uri, origin)) {
                         return;
                     }
                     this.logDiagnostic('status.connection_state_changed', {
@@ -1393,7 +1456,7 @@ export class CompileManager {
                         serverName,
                     });
                     await this.update();
-                })();
+                })().catch(error => this.logDiagnostic('status.connection_update_failed', {origin}, error));
             }),
             // register diagnostics triggers
             ...this.diagnosticProvider.triggers,

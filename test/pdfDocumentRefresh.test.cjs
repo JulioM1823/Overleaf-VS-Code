@@ -6,7 +6,7 @@ const vscode={Disposable:class{},EventEmitter:class{event(){}fire(value){changes
     workspace:{getConfiguration:()=>({get:(_key,fallback)=>fallback}),fs:{readFile:uri=>read(uri)}}};
 Module._load=function(request,parent,main){
     if(request==='vscode')return vscode;
-    if(parent?.filename.endsWith('/core/pdfViewEditorProvider.js')&&request==='../utils/globalStateManager')return {};
+    if(parent?.filename.replace(/\\/g, '/').endsWith('/core/pdfViewEditorProvider.js')&&request==='../utils/globalStateManager')return {};
     return originalLoad.call(this,request,parent,main);
 };
 const {PdfDocument}=require('../out/core/pdfViewEditorProvider');

@@ -4,6 +4,7 @@ import { OUTPUT_FOLDER_NAME, ROOT_NAME } from '../consts';
 import { RemoteFileSystemProvider, VirtualFileSystem } from '../core/remoteFileSystemProvider';
 import { logDiagnostic } from '../utils/diagnostics';
 import { LocalReplicaSCMProvider } from '../scm/localReplicaSCM';
+import { ProjectWorkspaceBinding, resolveActiveProjectWorkspaceBinding } from '../core/projectWorkspaceBinding';
 import {
     decodeSearchableTextContent,
     findProjectSearchMatches,
@@ -55,20 +56,19 @@ export class ProjectSearchProvider {
         };
     }
 
-    private async resolveLocalReplicaSearchContext(): Promise<ProjectSearchContext | undefined> {
-        const settings = await LocalReplicaSCMProvider.readSettings();
-        if (!settings?.uri) {
+    private async resolveLocalReplicaSearchContext(binding: ProjectWorkspaceBinding): Promise<ProjectSearchContext | undefined> {
+        const workspaceRoot = binding.workspaceRootUri;
+        if (!workspaceRoot) {
             return undefined;
         }
 
-        const originUri = vscode.Uri.parse(settings.uri);
+        const originUri = binding.overleafProjectUri;
         const vfs = await this.vfsm.prefetch(originUri);
-        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
         return {
             mode: 'localReplica',
             projectName: vfs.projectName,
             readFile: async (relPath: string) => {
-                const localUri = await LocalReplicaSCMProvider.pathToUri(relPath);
+                const localUri = await LocalReplicaSCMProvider.pathToUri(relPath, workspaceRoot);
                 if (localUri) {
                     try {
                         return await vscode.workspace.fs.readFile(localUri);
@@ -81,25 +81,19 @@ export class ProjectSearchProvider {
                 }
                 return vfs.openFile(vfs.pathToUri(relPath));
             },
-            resolveUri: async (relPath: string) => await LocalReplicaSCMProvider.pathToUri(relPath) ?? vfs.pathToUri(relPath),
-            rootUri: workspaceRoot ?? originUri,
+            resolveUri: async (relPath: string) => await LocalReplicaSCMProvider.pathToUri(relPath, workspaceRoot) ?? vfs.pathToUri(relPath),
+            rootUri: workspaceRoot,
             serverName: vfs.serverName,
             vfs,
         };
     }
 
     private async resolveSearchContext() {
-        const activeUri = vscode.window.activeTextEditor?.document.uri;
-        if (activeUri?.scheme === ROOT_NAME) {
-            return this.resolveRemoteSearchContext(activeUri);
-        }
-
-        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
-        if (workspaceRoot?.scheme === ROOT_NAME) {
-            return this.resolveRemoteSearchContext(workspaceRoot);
-        }
-
-        return this.resolveLocalReplicaSearchContext();
+        const binding = await resolveActiveProjectWorkspaceBinding();
+        if (!binding) { return undefined; }
+        return binding.mode==='currentWindow'
+            ? this.resolveRemoteSearchContext(binding.overleafProjectUri)
+            : this.resolveLocalReplicaSearchContext(binding);
     }
 
     private async promptQuery() {
@@ -310,9 +304,7 @@ export class ProjectSearchProvider {
 
     get triggers(): vscode.Disposable[] {
         return [
-            vscode.commands.registerCommand(`${ROOT_NAME}.projectSearch.searchProject`, () => {
-                void this.searchProject();
-            }),
+            vscode.commands.registerCommand(`${ROOT_NAME}.projectSearch.searchProject`, () => this.searchProject()),
         ];
     }
 }

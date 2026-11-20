@@ -7,6 +7,8 @@ const originalLoad = Module._load;
 const warningMessages = [];
 const errorMessages = [];
 const executedCommands = [];
+const diagnosticRecords = [];
+const eventHandlers = new Map();
 let availableCommands = [];
 let localReplicaSettings;
 let saveAllCount = 0;
@@ -134,13 +136,13 @@ Module._load = function patchedLoad(request, parent, isMain) {
     if (request==='../utils/eventBus' && parent?.id?.endsWith('/compileManager.js')) {
         return {
             EventBus: {
-                on: () => ({dispose: noop}),
+                on: (event, callback) => { eventHandlers.set(event, callback); return {dispose: noop}; },
             },
         };
     }
     if (request==='../utils/diagnostics' && parent?.id?.includes('/compileManager.js')) {
         return {
-            logDiagnostic: noop,
+            logDiagnostic: (_scope, event, fields, error) => diagnosticRecords.push({event, fields, error}),
             registerDiagnosticStateProvider: () => ({dispose: noop}),
             startDiagnosticSpan: () => ({
                 end: noop,
@@ -153,6 +155,19 @@ Module._load = function patchedLoad(request, parent, isMain) {
             LocalReplicaSCMProvider: {
                 readSettings: async () => localReplicaSettings,
             },
+        };
+    }
+    if (request==='../core/projectWorkspaceBinding' && parent?.id?.endsWith('/compileManager.js')) {
+        const binding = target => target?.scheme==='file' && localReplicaSettings?.uri ? {
+            mode: 'localReplica',
+            workspaceRootUri: {toString: () => 'file:///tmp/project'},
+            overleafProjectUri: createUri(localReplicaSettings.uri),
+            overleafUri: createUri(localReplicaSettings.uri),
+        } : undefined;
+        return {
+            resolveProjectDocumentBinding: async target => binding(target),
+            resolveProjectWorkspaceBindingForUri: async target => binding(target),
+            resolveActiveProjectWorkspaceBinding: async () => binding(vscodeMock.window.activeTextEditor?.document.uri),
         };
     }
     if (request==='./compileLogParser' && parent?.id?.endsWith('/compileManager.js')) {
@@ -189,6 +204,9 @@ test.beforeEach(() => {
     warningMessages.length = 0;
     errorMessages.length = 0;
     executedCommands.length = 0;
+    diagnosticRecords.length = 0;
+    eventHandlers.clear();
+    vscodeMock.workspace.workspaceFolders = [];
     availableCommands = [];
     localReplicaSettings = undefined;
     saveAllCount = 0;
@@ -673,6 +691,7 @@ test('failed remote compile without output.log shows actionable command failure'
 });
 
 test('offline command compile falls back to a local LaTeX Workshop build in a local replica', async () => {
+    vscodeMock.workspace.workspaceFolders = [{uri: {scheme:'file', toString:()=> 'file:///tmp/project'}}];
     const uri = createUri('overleaf-workshop://server/project/main.tex');
     const localUri = {
         path: '/tmp/project/main.tex',
@@ -759,6 +778,7 @@ test('offline command compile shows an offline-specific warning when no local fa
 });
 
 test('local-replica command compile prefers the local LaTeX Workshop build path', async () => {
+    vscodeMock.workspace.workspaceFolders = [{uri: {scheme:'file', toString:()=> 'file:///tmp/project'}}];
     const uri = createUri('overleaf-workshop://server/project/main.tex');
     const localUri = {
         path: '/tmp/project/main.tex',
@@ -850,4 +870,21 @@ test('compile-on-save keeps the saved local-replica file as the compile target',
     }
 
     assert.deepEqual(scheduledTargets, ['file:///tmp/project/main.tex']);
+});
+
+test('background save, compiler and connection failures are observed instead of escaping their event handlers', async () => {
+    const manager = new CompileManager({});
+    const originalCheck = CompileManager.check;
+    const triggers = manager.triggers;
+    CompileManager.check = async () => { throw new Error('Workspace unavailable'); };
+    try {
+        await onDidSaveTextDocumentHandler({uri:createUri('target'),fileName:'main.tex'});
+        eventHandlers.get('realtimeConnectionStateChangedEvent')({origin:'target'});
+        manager.compile = async () => { throw new Error('Preparation failed'); };
+        eventHandlers.get('compilerUpdateEvent')({});eventHandlers.get('rootDocUpdateEvent')({});
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(diagnosticRecords.some(record=>record.event==='compile.save_preparation_failed'),true);
+        assert.equal(diagnosticRecords.some(record=>record.event==='status.connection_update_failed'),true);
+        assert.equal(diagnosticRecords.filter(record=>record.event==='compile.automatic_failed').length,2);
+    } finally {CompileManager.check=originalCheck;triggers.forEach(trigger=>trigger.dispose?.());}
 });

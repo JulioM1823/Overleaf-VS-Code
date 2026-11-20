@@ -5,7 +5,7 @@ Module._load=function(request,parent,main){
     if(request==='vscode')return {Disposable:class{constructor(fn){this.dispose=fn;}},
         workspace:{getConfiguration:()=>({get:(_key,fallback)=>fallback}),onDidSaveTextDocument:fn=>(onSave=fn,disposable())},
         languages:{registerCompletionItemProvider:disposable}};
-    if(parent?.filename.endsWith('/intellisense/langCompletionProvider.js')){
+    if(parent?.filename.replace(/\\/g, '/').endsWith('/intellisense/langCompletionProvider.js')){
         if(request==='.')return {IntellisenseProvider:class{constructor(vfsm){this.vfsm=vfsm;}}};
         if(request==='../core/remoteFileSystemProvider')return {parseUri:u=>({serverName:u.server,userId:u.user,projectId:u.project,
             identifier:'same-user/same-id/Same',pathParts:['main.tex']})};

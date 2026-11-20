@@ -25,7 +25,7 @@ const vscode={
 };
 Module._load=function(request,parent,main){
     if(request==='vscode')return vscode;
-    if(parent?.filename.endsWith('/intellisense/langMisspellingCheckProvider.js')){
+    if(parent?.filename.replace(/\\/g, '/').endsWith('/intellisense/langMisspellingCheckProvider.js')){
         if(request==='.')return {IntellisenseProvider:class{constructor(vfsm){this.vfsm=vfsm;}}};
         if(request==='../core/remoteFileSystemProvider')return {parseUri:u=>({serverName:'server',userId:u.user,projectId:u.project})};
         if(request==='../utils/eventBus')return {EventBus:{on:(_event,fn)=>(handlers.language=fn,disposable())}};
@@ -132,4 +132,18 @@ test('inserting a newline refreshes shifted diagnostic ranges and disabling spel
     clearTimeout(queued.timer);await f.provider.runScan(document.uri.toString());
     assert.deepEqual(collection.get(document.uri).map(item=>item.range.start.line),[0,1,2]);
     f.projects.get('shifted:u').language='';await f.run(document);assert.equal(collection.get(document.uri),undefined);f.dispose();
+});
+test('dictionary settings target the active project in multi-root workspaces using VS Code 1.80 quick-pick fields',async()=>{
+    const f=fixture(),active=doc('active').uri;let requested,dictionaryOpened=false;
+    vscode.workspace.workspaceFolders=[{uri:{scheme:'file'}},{uri:doc('first').uri},{uri:active}];
+    vscode.QuickPickItemKind={Separator:-1};
+    vscode.window={activeTextEditor:{document:{uri:active}},showQuickPick:async items=>{
+        assert.equal(items[0].id,'dictionary');assert.equal(items[0].label,'Manage Dictionary');
+        assert.equal('iconPath' in items[0],false);return items[0];
+    }};
+    f.provider.vfsm.prefetch=async uri=>{requested=uri;return {getSpellCheckLanguage:()=>({code:'en'}),getAllSpellCheckLanguages:()=>[]};};
+    f.provider.dictionarySettings=async()=>{dictionaryOpened=true;};
+    try {
+        await f.provider.spellCheckSettings();assert.equal(requested,active);assert.equal(dictionaryOpened,true);
+    } finally {delete vscode.workspace.workspaceFolders;delete vscode.window;f.dispose();}
 });
