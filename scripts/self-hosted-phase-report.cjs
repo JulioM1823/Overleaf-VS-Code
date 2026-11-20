@@ -48,4 +48,14 @@ function verifyPhase(filename, phase, phaseRunId, observe) {
     checkEvidence(report, phase);
     return report;
 }
-module.exports = {beginPhase, failPhase, completePhase, verifyPhase};
+async function withDeadline(operation, milliseconds, message) {
+    let timer;
+    try {
+        return await Promise.race([Promise.resolve().then(operation), new Promise((resolve, reject) => {
+            timer = setTimeout(() => {
+                const error = new Error(message); error.code = 'ORBITLEAF_CE_DEADLINE'; reject(error);
+            }, milliseconds);
+        })]);
+    } finally { clearTimeout(timer); }
+}
+module.exports = {beginPhase, failPhase, completePhase, verifyPhase, withDeadline};

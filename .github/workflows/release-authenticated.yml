@@ -23,8 +23,10 @@ jobs:
         with:
           node-version: '22'
       - run: npm ci && npm ci --prefix views/chat-view && npm run compile
+      - name: Install an encrypted Secret Service for the isolated desktop session
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y dbus gnome-keyring libsecret-tools
       - name: Genuine CE authentication, editing, reconnect and restart
-        run: xvfb-run -a node scripts/run-self-hosted-acceptance.cjs ${{ matrix.vscode }}
+        run: xvfb-run -a dbus-run-session -- node scripts/run-self-hosted-acceptance.cjs ${{ matrix.vscode }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:

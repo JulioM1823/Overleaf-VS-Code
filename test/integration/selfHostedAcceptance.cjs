@@ -6,7 +6,7 @@ const vscode = require('vscode');
 const root = path.resolve(__dirname, '../..');
 const {GlobalStateManager} = require(path.join(root, 'out/utils/globalStateManager'));
 const {BaseAPI} = require(path.join(root, 'out/api/base'));
-const {completePhase, failPhase} = require('../../scripts/self-hosted-phase-report.cjs');
+const {completePhase, failPhase, withDeadline} = require('../../scripts/self-hosted-phase-report.cjs');
 
 exports.run = async () => {
     const accounts = JSON.parse(fs.readFileSync(process.env.OVERLEAF_CE_ACCOUNT_FILE, 'utf8'));
@@ -19,7 +19,7 @@ exports.run = async () => {
     const targetWindow = socketModule?.require('vscode').window;
     const apiSurface = {targetWindowShared: targetWindow === vscode.window,
         targetWarningWritable: !!Object.getOwnPropertyDescriptor(targetWindow || {}, 'showWarningMessage')?.writable};
-    const progress = {contextCaptured: false, passwordLoginChecked: false, secretStorageMetadataChecked: false, projectReady: false};
+    const progress = {contextCaptured: false, passwordLoginChecked: false, passwordHttpResponses: 0, passwordHttpSucceeded: false, secretStorageMetadataChecked: false, projectReady: false};
     const checkpoint = () => {
         const current = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
         fs.writeFileSync(reportPath, JSON.stringify({...current, stage, progress, apiSurface}, null, 2) + '\n', {mode: 0o600});
@@ -49,15 +49,28 @@ exports.run = async () => {
         GlobalStateManager.addServer(context, url.host, url.href);
         stage = 'real-password-login-and-secret-storage'; checkpoint();
         const api = new BaseAPI(url.href);
+        const passportLogin = api.passportLogin.bind(api);
+        api.passportLogin = async (...args) => {
+            stage = 'password-login-http'; checkpoint();
+            const response = await withDeadline(() => passportLogin(...args), 45000, 'Synthetic CE password HTTP login exceeded 45 seconds');
+            progress.passwordHttpResponses++; progress.passwordHttpSucceeded = response.type === 'success';
+            stage = 'password-http-completed-before-secret-storage'; checkpoint();
+            return response;
+        };
         let login;
         if (phase === 'initial') {
-            assert(await GlobalStateManager.loginServer(context, api, url.host, accounts[0]), 'Synthetic CE password login must succeed');
+            assert(await withDeadline(() => GlobalStateManager.loginServer(context, api, url.host, accounts[0]), 60000,
+                'Synthetic CE production login and SecretStorage persistence exceeded 60 seconds'), 'Synthetic CE password login must succeed');
+            progress.passwordLoginChecked = true; checkpoint();
             login = await api.passportLogin(accounts[0].email, accounts[0].password);
         } else {
             const state = JSON.parse(fs.readFileSync(process.env.OVERLEAF_CE_STATE_FILE, 'utf8'));
-            const identity = await GlobalStateManager.authenticate(context, url.host, state.userId);
+            stage = 'secret-storage-reload-after-restart'; checkpoint();
+            const identity = await withDeadline(() => GlobalStateManager.authenticate(context, url.host, state.userId), 60000,
+                'Synthetic CE SecretStorage reload exceeded 60 seconds');
             assert(identity, 'Normal-host SecretStorage session must survive editor/server restart without password login');
-            login = await api.cookiesLogin(identity.cookies);
+            stage = 'stored-session-http-validation'; checkpoint();
+            login = await withDeadline(() => api.cookiesLogin(identity.cookies), 45000, 'Synthetic CE stored-session HTTP validation exceeded 45 seconds');
         }
         assert.equal(login.type, 'success'); assert(login.identity && login.userInfo);
         progress.passwordLoginChecked = true; checkpoint();
@@ -87,7 +100,7 @@ exports.run = async () => {
             serverRestartBeforePhase: phase === 'restart'});
     } catch (error) {
         failPhase(reportPath, phase, process.env.OVERLEAF_CE_PHASE_RUN_ID,
-            error instanceof assert.AssertionError ? error.message : 'Acceptance operation failed; sensitive server response omitted.');
+            error instanceof assert.AssertionError || error.code === 'ORBITLEAF_CE_DEADLINE' ? error.message : 'Acceptance operation failed; sensitive server response omitted.');
         const failed = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
         failed.stage = stage;
         failed.progress = progress;

@@ -91,3 +91,10 @@ test('failed phase diagnostics are published before verification rejects and pri
     assert.equal(retained.phaseRunId, 'fresh');
     assert.equal(retained.reason, 'Synthetic password login failed');
 });
+
+test('native login deadlines reject a hung operation with a fixed diagnostic and preserve successful values', async () => {
+    const {withDeadline} = require('../scripts/self-hosted-phase-report.cjs');
+    await assert.rejects(withDeadline(() => new Promise(() => {}), 10, 'Synthetic login deadline'),
+        error => error.code === 'ORBITLEAF_CE_DEADLINE' && error.message === 'Synthetic login deadline');
+    assert.equal(await withDeadline(async () => 'complete', 1000, 'Unused deadline'), 'complete');
+});

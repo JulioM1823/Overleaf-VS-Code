@@ -39,11 +39,25 @@ function command(executable, args, {input, env = process.env, timeout = 600000, 
     });
 }
 
+function assertLinuxSecretSession() {
+    if (process.platform !== 'linux' || !process.env.DBUS_SESSION_BUS_ADDRESS) {
+        throw new Error('Genuine CE native acceptance requires Linux inside an isolated dbus-run-session');
+    }
+}
+
 async function main() {
     const root = path.resolve(__dirname, '..');
     const version = process.argv[2] || 'stable';
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'orbitleaf-ce-'));
     fs.chmodSync(directory, 0o700);
+    // Keep the synthetic desktop keyring under this task's private directory;
+    // leave the runner's HOME and existing desktop credential stores untouched.
+    const desktopEnv = {...process.env, XDG_DATA_HOME: path.join(directory, 'desktop-data'),
+        XDG_CONFIG_HOME: path.join(directory, 'desktop-config'), XDG_CACHE_HOME: path.join(directory, 'desktop-cache'),
+        XDG_RUNTIME_DIR: path.join(directory, 'desktop-runtime')};
+    delete desktopEnv.GNOME_KEYRING_CONTROL;
+    for (const name of ['XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR']) fs.mkdirSync(desktopEnv[name], {recursive: true, mode: 0o700});
+    let keyringProcess;
     const project = 'orbitleaf-ce-' + crypto.randomBytes(5).toString('hex');
     const composePath = path.join(directory, 'compose.json');
     const accountPath = path.join(directory, 'accounts.json');
@@ -135,8 +149,61 @@ async function main() {
         console.log('Acceptance: two synthetic server accounts created; starting isolated native editor.');
         const executable = await downloadAndUnzipVSCode({version,
             cachePath: process.env.OVERLEAF_VSCODE_CACHE || path.join(os.tmpdir(), 'overleaf-vscode-compat')});
+        assertLinuxSecretSession();
+        const existingOwner = await command('dbus-send', ['--session', '--print-reply', '--dest=org.freedesktop.DBus',
+            '/org/freedesktop/DBus', 'org.freedesktop.DBus.NameHasOwner', 'string:org.freedesktop.secrets'],
+            {env: desktopEnv, timeout: 5000});
+        if (!/\bboolean false\b/.test(existingOwner)) throw new Error('Acceptance requires an unused isolated Secret Service session');
+        const controlDirectory = path.join(directory, 'keyring-control');
+        fs.mkdirSync(controlDirectory, {mode: 0o700});
+        desktopEnv.GNOME_KEYRING_CONTROL = controlDirectory;
+        await command('dbus-update-activation-environment', ['XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME',
+            'XDG_RUNTIME_DIR', 'GNOME_KEYRING_CONTROL'].map(name => `${name}=${desktopEnv[name]}`),
+            {env: desktopEnv, timeout: 5000});
+        const unlockPassword = crypto.randomBytes(32).toString('base64');
+        let keyringFailed = false;
+        keyringProcess = spawn('gnome-keyring-daemon', ['--foreground', '--unlock', '--components=secrets',
+            '--control-directory', controlDirectory], {env: desktopEnv, stdio: ['pipe', 'ignore', 'ignore']});
+        keyringProcess.once('error', () => { keyringFailed = true; });
+        keyringProcess.once('close', () => { keyringFailed = true; });
+        keyringProcess.stdin.on('error', () => { keyringFailed = true; });
+        keyringProcess.stdin.end(unlockPassword + '\n');
+        await waitFor(async () => {
+            if (keyringFailed) return false;
+            // Queries to the bus daemon do not activate a Secret Service. Only
+            // address that service once its owner is this task's foreground PID.
+            const owned = await command('dbus-send', ['--session', '--print-reply', '--dest=org.freedesktop.DBus',
+                '/org/freedesktop/DBus', 'org.freedesktop.DBus.NameHasOwner', 'string:org.freedesktop.secrets'],
+                {env: desktopEnv, timeout: 5000});
+            if (!/\bboolean true\b/.test(owned)) return false;
+            const owner = await command('dbus-send', ['--session', '--print-reply', '--dest=org.freedesktop.DBus',
+                '/org/freedesktop/DBus', 'org.freedesktop.DBus.GetConnectionUnixProcessID', 'string:org.freedesktop.secrets'],
+                {env: desktopEnv, timeout: 5000});
+            if (Number(owner.match(/\buint32 (\d+)\b/)?.[1]) !== keyringProcess.pid) return false;
+            const state = await command('dbus-send', ['--session', '--print-reply', '--dest=org.freedesktop.secrets',
+                '/org/freedesktop/secrets/collection/login', 'org.freedesktop.DBus.Properties.Get',
+                'string:org.freedesktop.Secret.Collection', 'string:Locked'], {env: desktopEnv, timeout: 5000});
+            return /\bboolean false\b/.test(state);
+        }, 'unlocked task-local encrypted Secret Service', 20000);
+        const probeId = crypto.randomUUID();
+        const probeValue = crypto.randomBytes(32).toString('base64');
+        await command('secret-tool', ['store', '--label=Orbitleaf disposable acceptance probe', 'orbitleaf-audit', probeId],
+            {env: desktopEnv, input: probeValue, timeout: 10000});
+        const loadedProbe = await command('secret-tool', ['lookup', 'orbitleaf-audit', probeId], {env: desktopEnv, timeout: 10000});
+        if (loadedProbe.trim() !== probeValue) throw new Error('Task-local encrypted Secret Service round trip failed');
+        const keyringFile = path.join(desktopEnv.XDG_DATA_HOME, 'keyrings', 'login.keyring');
+        let keyringBytes;
+        try { keyringBytes = fs.readFileSync(keyringFile); }
+        catch { throw new Error('Task-local encrypted keyring binary file is unavailable'); }
+        const binaryFormat = keyringBytes.subarray(0, 16).equals(Buffer.from('GnomeKeyring\n\r\0\n'));
+        if (!binaryFormat || keyringBytes.includes(Buffer.from(probeValue)) || keyringBytes.includes(Buffer.from(unlockPassword))) {
+            throw new Error('Task-local keyring must use its password-protected binary format');
+        }
+        await command('secret-tool', ['clear', 'orbitleaf-audit', probeId], {env: desktopEnv, timeout: 10000});
+        report.secretService = {provider: 'gnome-libsecret', taskScopedXdgDirectories: true, separateDbusSession: true,
+            nonemptyRandomUnlockPassword: true, serviceOwnerMatchesTaskDaemon: true, collectionUnlocked: true, roundTrip: true, passwordProtectedBinaryFormat: true}; save();
         const profile = path.join(directory, 'profile');
-        const env = {...process.env, OVERLEAF_CE_ACCOUNT_FILE: accountPath, OVERLEAF_CE_STATE_FILE: statePath,
+        const env = {...desktopEnv, OVERLEAF_CE_ACCOUNT_FILE: accountPath, OVERLEAF_CE_STATE_FILE: statePath,
             OVERLEAF_CE_URL: url, OVERLEAF_CE_REPORT: reportPath, OVERLEAF_SELF_HOSTED_ACCEPTANCE: '1',
             OVERLEAF_LIVE_REPORT: path.join(directory, 'live-report.json')};
         delete env.ELECTRON_RUN_AS_NODE; delete env.VSCODE_IPC_HOOK_CLI;
@@ -148,7 +215,7 @@ async function main() {
             try { await command(executable, ['--user-data-dir', path.join(profile, 'user'), '--extensions-dir', path.join(profile, 'extensions'),
                 '--extensionDevelopmentPath=' + root,
                 '--extensionDevelopmentPath=' + path.join(root, 'test/integration/self-hosted-driver'),
-                '--disable-extensions', '--disable-updates', '--skip-welcome', '--skip-release-notes', '--disable-telemetry', '--new-window'],
+                '--password-store=gnome-libsecret', '--disable-extensions', '--disable-updates', '--skip-welcome', '--skip-release-notes', '--disable-telemetry', '--new-window'],
             {env: {...env, OVERLEAF_CE_PHASE: phase, OVERLEAF_CE_PHASE_RUN_ID: phaseRunId}, timeout: 720000, inherit: true}); }
             catch (error) { executionError = error; }
             verifyPhase(env.OVERLEAF_LIVE_REPORT, phase, phaseRunId, live => {
@@ -171,6 +238,13 @@ async function main() {
         save(); throw error;
     } finally {
         await docker(['down', '--volumes', '--remove-orphans']).catch(() => { report.cleanupFailure = true; save(); });
+        if (keyringProcess && keyringProcess.exitCode === null) {
+            keyringProcess.kill('SIGTERM');
+            await new Promise(resolve => {
+                const timer = setTimeout(() => { keyringProcess.kill('SIGKILL'); resolve(); }, 3000);
+                keyringProcess.once('close', () => { clearTimeout(timer); resolve(); });
+            });
+        }
         fs.rmSync(directory, {recursive: true, force: true});
     }
 }
