@@ -27,6 +27,14 @@ exports.run = async () => {
     checkpoint();
     const getServers = GlobalStateManager.getServers;
     let context;
+    let loginStartUrl;
+    const loginGuard = () => {
+        const state = GlobalStateManager.lifecycle(context, url.host);
+        const server = context.globalState.get('overleaf-servers', {})[url.host];
+        return {generation: state.generation, loginAttempt: state.loginAttempt, ending: state.ending,
+            serverPresent: !!server, serverUrlMatchesExpected: server?.url === url.href,
+            serverUrlMatchesLoginStart: server?.url === loginStartUrl, loginMetadataPresent: !!server?.login};
+    };
     GlobalStateManager.getServers = function (...args) { context = args[0]; return getServers.apply(this, args); };
     const originalWarning = vscode.window.showWarningMessage;
     vscode.window.showWarningMessage = async function (message, ...items) {
@@ -47,6 +55,8 @@ exports.run = async () => {
         progress.contextCaptured = true;
         GlobalStateManager.getServers = getServers;
         GlobalStateManager.addServer(context, url.host, url.href);
+        loginStartUrl = context.globalState.get('overleaf-servers', {})[url.host]?.url;
+        progress.loginGuardAfterAdd = loginGuard();
         stage = 'real-password-login-and-secret-storage'; checkpoint();
         const api = new BaseAPI(url.href);
         const passportLogin = api.passportLogin.bind(api);
@@ -54,13 +64,18 @@ exports.run = async () => {
             stage = 'password-login-http'; checkpoint();
             const response = await withDeadline(() => passportLogin(...args), 45000, 'Synthetic CE password HTTP login exceeded 45 seconds');
             progress.passwordHttpResponses++; progress.passwordHttpSucceeded = response.type === 'success';
+            progress.passwordHttpIdentityPresent = !!response.identity; progress.passwordHttpUserInfoPresent = !!response.userInfo;
+            progress.loginGuardAfterPasswordHttp = loginGuard();
             stage = 'password-http-completed-before-secret-storage'; checkpoint();
             return response;
         };
         let login;
         if (phase === 'initial') {
-            assert(await withDeadline(() => GlobalStateManager.loginServer(context, api, url.host, accounts[0]), 60000,
-                'Synthetic CE production login and SecretStorage persistence exceeded 60 seconds'), 'Synthetic CE password login must succeed');
+            progress.loginGuardBeforeLogin = loginGuard(); checkpoint();
+            const productionLogin = await withDeadline(() => GlobalStateManager.loginServer(context, api, url.host, accounts[0]), 60000,
+                'Synthetic CE production login and SecretStorage persistence exceeded 60 seconds');
+            progress.productionLoginReturned = productionLogin; progress.loginGuardAfterLogin = loginGuard(); checkpoint();
+            assert(productionLogin, 'Synthetic CE password login must succeed');
             progress.passwordLoginChecked = true; checkpoint();
             login = await api.passportLogin(accounts[0].email, accounts[0].password);
         } else {

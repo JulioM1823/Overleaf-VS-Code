@@ -5,7 +5,7 @@ const crypto = require('node:crypto');
 const vscode = require('vscode');
 const fetch = require('node-fetch');
 const {BaseAPI} = require(path.resolve(__dirname, '../../out/api/base'));
-const {confirmUnsupportedCeComments, canonicalNotFoundBody} = require('../../scripts/self-hosted-phase-report.cjs');
+const {confirmUnsupportedCeComments, canonicalNotFoundBody, compileAfterThrottle} = require('../../scripts/self-hosted-phase-report.cjs');
 
 exports.run = async ({vfs, uri, docId, projectId, effects}) => {
     const accounts = JSON.parse(fs.readFileSync(process.env.OVERLEAF_CE_ACCOUNT_FILE, 'utf8'));
@@ -70,7 +70,9 @@ exports.run = async ({vfs, uri, docId, projectId, effects}) => {
 
     }
 
-    const compiled = await vfs.api.compile(identity, projectId, 'main.tex', false, false);
+    const compilation = await compileAfterThrottle(() => vfs.api.compile(identity, projectId, 'main.tex', false, false));
+    effects.push({scenario: 'authenticated-server-compile-attempts', status: 'observed', statuses: compilation.statuses});
+    const compiled = compilation.response;
     assert.equal(compiled.type, 'success');
     assert.equal(compiled.compile.status, 'success', 'Genuine CE TeX compiler must succeed');
     const pdf = compiled.compile.outputFiles.find(file => /\.pdf$/i.test(file.path));

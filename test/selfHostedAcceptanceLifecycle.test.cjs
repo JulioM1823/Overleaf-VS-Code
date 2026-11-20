@@ -126,3 +126,19 @@ test('comment Not Found evidence comes from canonical visible text, not opaque s
     assert(!canonicalNotFoundBody('<script>const value="not found";</script><p>Unknown error 404</p>', commentProbe.path));
     assert(!canonicalNotFoundBody('<pre>Cannot GET /wrong/route</pre>', commentProbe.path));
 });
+
+test('compile backoff retries only explicit server throttle, preserves statuses, and stays bounded', async () => {
+    const {compileAfterThrottle} = require('../scripts/self-hosted-phase-report.cjs');
+    let calls = 0, waits = 0;
+    const result = await compileAfterThrottle(async () => ({type: 'success', compile: {status: ++calls < 3 ? 'too-recently-compiled' : 'success'}}),
+        {wait: async () => { waits++; }});
+    assert.deepEqual(result.statuses, ['too-recently-compiled', 'too-recently-compiled', 'success']);
+    assert.equal(waits, 2); assert.equal(calls, 3);
+    calls = 0;
+    const failed = await compileAfterThrottle(async () => { calls++; return {type: 'success', compile: {status: 'failure'}}; },
+        {wait: async () => assert.fail('Non-throttle failures must not retry')});
+    assert.equal(calls, 1); assert.deepEqual(failed.statuses, ['failure']);
+    const bounded = await compileAfterThrottle(async () => ({type: 'success', compile: {status: 'too-recently-compiled'}}),
+        {maxAttempts: 3, wait: async () => {}});
+    assert.equal(bounded.statuses.length, 3); assert.equal(bounded.response.compile.status, 'too-recently-compiled');
+});

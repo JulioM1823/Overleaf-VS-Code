@@ -80,4 +80,16 @@ function canonicalNotFoundBody(body, requestedPath) {
     return /\bnot[ -]found\b|\bcan(?:not|['’]t) find (?:the|that|this) page\b/i.test(visible)
         || visible.includes(`Cannot GET ${requestedPath}`);
 }
-module.exports = {beginPhase, failPhase, completePhase, verifyPhase, withDeadline, confirmUnsupportedCeComments, canonicalNotFoundBody};
+async function compileAfterThrottle(operation, {maxAttempts = 8, wait = () => new Promise(resolve => setTimeout(resolve, 2000))} = {}) {
+    const statuses = [];
+    let response;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        response = await operation();
+        const status = response.type === 'success' ? response.compile?.status : 'api-error';
+        statuses.push(typeof status === 'string' && /^[a-z-]{1,40}$/.test(status) ? status : 'unknown');
+        if (status !== 'too-recently-compiled' || attempt + 1 === maxAttempts) break;
+        await wait();
+    }
+    return {response, statuses};
+}
+module.exports = {beginPhase, failPhase, completePhase, verifyPhase, withDeadline, confirmUnsupportedCeComments, canonicalNotFoundBody, compileAfterThrottle};
