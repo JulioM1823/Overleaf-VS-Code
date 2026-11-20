@@ -20,19 +20,38 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Verify the original audited distribution
+        id: verify_distribution
+        run: >-
+          node -e "const fs = require('node:fs'); const assert = require('node:assert/strict'); const {createHash} = require('node:crypto'); assert.equal(createHash('sha256').update(fs.readFileSync('audit-distribution.vsix')).digest('hex'), 'bf3c1120a600dccaf6bc0ce9a4566ae2ed5b70064db512b487d7b3a2b9ac19ad');"
       - run: npm ci && npm ci --prefix views/chat-view
       - run: npm test
       - run: npx --yes @vscode/vsce@4.1.0 package --out orbitleaf.vsix
       - name: Test installed package (Linux)
         if: runner.os == 'Linux'
+        env:
+          RELEASE_SMOKE_REPORT: output/release-audit/rebuilt-${{ runner.os }}-${{ matrix.vscode }}.json
         run: xvfb-run -a node scripts/run-release-compat.cjs orbitleaf.vsix ${{ matrix.vscode }}
       - name: Test installed package (macOS / Windows)
         if: runner.os != 'Linux'
+        env:
+          RELEASE_SMOKE_REPORT: output/release-audit/rebuilt-${{ runner.os }}-${{ matrix.vscode }}.json
         run: node scripts/run-release-compat.cjs orbitleaf.vsix ${{ matrix.vscode }}
+      - name: Test original audited distribution (Linux)
+        if: ${{ !cancelled() && steps.verify_distribution.outcome == 'success' && runner.os == 'Linux' }}
+        env:
+          RELEASE_SMOKE_REPORT: output/release-audit/distribution-${{ runner.os }}-${{ matrix.vscode }}.json
+        run: xvfb-run -a node scripts/run-release-compat.cjs audit-distribution.vsix ${{ matrix.vscode }}
+      - name: Test original audited distribution (macOS / Windows)
+        if: ${{ !cancelled() && steps.verify_distribution.outcome == 'success' && runner.os != 'Linux' }}
+        env:
+          RELEASE_SMOKE_REPORT: output/release-audit/distribution-${{ runner.os }}-${{ matrix.vscode }}.json
+        run: node scripts/run-release-compat.cjs audit-distribution.vsix ${{ matrix.vscode }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: orbitleaf-${{ matrix.os }}-${{ matrix.vscode }}
           path: |
             orbitleaf.vsix
+            audit-distribution.vsix
             output/release-audit/*.json
