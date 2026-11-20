@@ -19,7 +19,21 @@ function command(executable, args, {input, env = process.env, timeout = 600000, 
             clearTimeout(timer);
             if (code === 0) resolve(Buffer.concat(mergeOutput ? output.concat(errors) : output).toString());
             // Never echo captured server/account-bootstrap output: it can contain session data.
-            else reject(new Error(`Acceptance subprocess failed: ${path.basename(executable)} exit ${code}`));
+            else {
+                const error = new Error(`Acceptance subprocess failed: ${path.basename(executable)} exit ${code}`);
+                const marker = Buffer.concat(output.concat(errors)).toString().split(/\r?\n/)
+                    .find(line => line.startsWith('ORBITLEAF_BOOTSTRAP_ERROR '));
+                if (marker) {
+                    try {
+                        const parsed = JSON.parse(marker.slice('ORBITLEAF_BOOTSTRAP_ERROR '.length));
+                        const safe = value => typeof value === 'string' && /^[a-zA-Z0-9_.-]{1,80}$/.test(value) ? value : 'omitted';
+                        error.bootstrapDiagnostic = {operation: safe(parsed.operation), errorName: safe(parsed.errorName),
+                            errorCode: safe(parsed.errorCode), validationFields: Array.isArray(parsed.validationFields)
+                                ? parsed.validationFields.map(safe).slice(0, 10) : []};
+                    } catch {}
+                }
+                reject(error);
+            }
         });
         child.stdin.end(input);
     });
@@ -41,8 +55,8 @@ async function main() {
         publishedServerPorts: '127.0.0.1:18082 only', phases: [], limitations: ['Community Edition is not hosted Overleaf SSO/captcha acceptance.']};
     let accountBootstrapStarted = false;
     const save = () => fs.writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n', {mode: 0o600});
-    const accounts = [{email: 'owner@acceptance.invalid', password: crypto.randomBytes(32).toString('base64url')},
-        {email: 'outsider@acceptance.invalid', password: crypto.randomBytes(32).toString('base64url')}];
+    const accounts = [{email: 'owner@acceptance.invalid', password: crypto.randomBytes(32).toString('base64url'), analyticsId: crypto.randomUUID()},
+        {email: 'outsider@acceptance.invalid', password: crypto.randomBytes(32).toString('base64url'), analyticsId: crypto.randomUUID()}];
     fs.writeFileSync(accountPath, JSON.stringify(accounts), {mode: 0o600});
     const url = 'http://127.0.0.1:18082/';
     const compose = {services: {
@@ -113,9 +127,11 @@ async function main() {
         await waitFor(async () => (await docker(['exec', '-T', 'mongo', 'mongosh', '--quiet', '--eval', 'db.hello().isWritablePrimary'])).trim() === 'true', 'MongoDB primary');
         await docker(['up', '-d', 'server']);
         await serverReady();
-        const bootstrap = `import fs from 'node:fs';\nimport Registration from './app/src/Features/User/UserRegistrationHandler.mjs';\nconst accounts=JSON.parse(fs.readFileSync(0,'utf8'));\nfor(const account of accounts){await Registration.promises.registerNewUser(account);}\nprocess.exit(0);`;
+        const bootstrap = `let operation='read-account-input';\ntry {\nconst fs=await import('node:fs');\nconst accounts=JSON.parse(fs.readFileSync(0,'utf8'));\noperation='import-registration';\nconst {default:Registration}=await import('./app/src/Features/User/UserRegistrationHandler.mjs');\nfor(const [index,account] of accounts.entries()){operation='register-account-'+index;await Registration.promises.registerNewUser(account);}\nprocess.exit(0);\n} catch(error) {\nconsole.error('ORBITLEAF_BOOTSTRAP_ERROR '+JSON.stringify({operation,errorName:error.name,errorCode:error.code||'none',validationFields:Object.keys(error.errors||{})}));\nprocess.exit(1);\n}`;
         accountBootstrapStarted = true;
-        await docker(['exec', '-T', '-w', '/overleaf/services/web', 'server', 'node', '--input-type=module', '-e', bootstrap], {input: JSON.stringify(accounts)});
+        await docker(['exec', '-T', 'server', 'bash', '-c',
+            'source /etc/overleaf/env.sh && source /etc/container_environment.sh && cd /overleaf/services/web && exec node --input-type=module -e "$1"',
+            'orbitleaf-acceptance-bootstrap', bootstrap], {input: JSON.stringify(accounts)});
         console.log('Acceptance: two synthetic server accounts created; starting isolated native editor.');
         const executable = await downloadAndUnzipVSCode({version,
             cachePath: process.env.OVERLEAF_VSCODE_CACHE || path.join(os.tmpdir(), 'overleaf-vscode-compat')});
@@ -145,6 +161,7 @@ async function main() {
         console.log(`Genuine self-hosted acceptance passed: ${reportPath}`);
     } catch (error) {
         report.status = 'failed'; report.failure = error.message;
+        if (error.bootstrapDiagnostic) report.bootstrapDiagnostic = error.bootstrapDiagnostic;
         await preAccountDiagnostics();
         save(); throw error;
     } finally {
