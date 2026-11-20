@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const vscode = require('vscode');
+const {loadedInstalledModule} = require('./loaded-module.cjs');
 
 const attribution = 'This extension is built on the source code of [Overleaf Workshop](https://github.com/overleaf-workshop/Overleaf-Workshop), developed by iamhyc and the Overleaf Workshop contributors.';
 
@@ -153,7 +154,11 @@ exports.run = async () => {
         // VS Code extension-test hosts use in-memory state. Observe the installed
         // method's actual tree reads without substituting its arguments or result.
         // Only public server metadata is retained; no SecretStorage is accessed.
-        const {GlobalStateManager} = require(path.join(extensionPath, 'out/utils/globalStateManager.js'));
+        // Requiring a differently cased path can create another CommonJS module
+        // on Windows. Observe the class already used by the installed extension.
+        const loadedStateModule = loadedInstalledModule(extensionPath, 'out/utils/globalStateManager.js');
+        const {GlobalStateManager} = loadedStateModule.exports;
+        report.observedStateModule = loadedStateModule.filename;
         const getServers = GlobalStateManager.getServers;
         let observedContext;
         GlobalStateManager.getServers = function (...args) {
@@ -163,6 +168,10 @@ exports.run = async () => {
         };
         try {
             await vscode.commands.executeCommand('overleaf-workshop.projectManager.focus');
+            // The view may already have queried the tree during activation.
+            // Its real refresh command requests a fresh root read without
+            // replacing a method's arguments, result, or persisted state.
+            await vscode.commands.executeCommand('overleaf-workshop.projectManager.refreshServer', {name: 'www.overleaf.com'});
             const deadline = Date.now() + 5000;
             while (!observedContext && Date.now() < deadline) {
                 await new Promise(resolve => setTimeout(resolve, 50));

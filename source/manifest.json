@@ -2,7 +2,7 @@
   "extensionId": "AstroJulio.orbitleaf",
   "version": "0.16.7",
   "archive": "orbitleaf-0.16.7-source.zip",
-  "sha256": "cd09efa1aade038fbf45a1b0815db554fec3dd26cde899dd577ae438b0909985",
+  "sha256": "359e9f89fbaf61bd064945b6678258c0bdc451964c6aa9de985489c7b10e9809",
   "files": [
     {
       "path": ".eslintrc.json",
@@ -1275,14 +1275,19 @@
       "sha256": "eaf4dc71a45e99c1fb1846b03a48a1ee8690cb0550c3eff426049c15de89aa9c"
     },
     {
+      "path": "test/integration/release-driver/loaded-module.cjs",
+      "bytes": 1430,
+      "sha256": "3227cc3cfb7dfa3314777a7fdd87757eaf7679e21518e6b043d864bb5d7d47ba"
+    },
+    {
       "path": "test/integration/release-driver/package.json",
       "bytes": 228,
       "sha256": "3bd98d8f2bbc7fc4886c90fcfe7ae483153c1d5c1dbfc186424e45931998fe29"
     },
     {
       "path": "test/integration/release-driver/smoke.cjs",
-      "bytes": 11609,
-      "sha256": "cc2039b6bef4045b11522c6be971d8e2a0e55753beed26bf2299d2b89f2c0208"
+      "bytes": 12320,
+      "sha256": "fe9d70d18aca2c9f5cf704b6c85c3b4bba3cd99406d5d51720c04e5f2cff5f4a"
     },
     {
       "path": "test/integration/webviewProbe.js",
@@ -1513,6 +1518,11 @@
       "path": "test/releaseSmokeLauncher.test.cjs",
       "bytes": 3154,
       "sha256": "fc27e8e66a3cb7b5045ec152f642e55640fb2c956a73ac5b973d449f9146cab6"
+    },
+    {
+      "path": "test/releaseSmokeLoadedModule.test.cjs",
+      "bytes": 2607,
+      "sha256": "6df9a514ebfddbc107b8167f32291b630a214010ce3e6f49255833bf1a346c81"
     },
     {
       "path": "test/remoteFileSystemSync.test.cjs",
