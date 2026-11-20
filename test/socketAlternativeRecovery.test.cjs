@@ -4,11 +4,12 @@ const Module = require('node:module');
 const originalLoad = Module._load;
 let choice;
 const notices=[];
+const confirmations=[];
 Module._load = function(request,parent,main) {
     if (request==='vscode') return {
         Disposable:class{},workspace:{textDocuments:[],onDidChangeConfiguration:()=>({dispose(){}}),getConfiguration:()=>({get:(_key,fallback)=>fallback})},
         Uri:{parse:value=>value},commands:{executeCommand:async()=>({getCurrentVersion:async()=>4})},
-        l10n:{t:x=>x},ProgressLocation:{Window:10},window:{showWarningMessage:async()=>choice,
+        l10n:{t:x=>x},ProgressLocation:{Window:10},window:{showWarningMessage:async(...args)=>{confirmations.push(args);return choice;},
             showInformationMessage:async message=>notices.push(message),
             withProgress:async(_options,task)=>task({report(){}},{isCancellationRequested:false})},
     };
@@ -68,14 +69,52 @@ test('new recovery copies remain available when project history is unavailable',
     assert.equal(f.events.length,1);assert.equal(f.socket.unSyncedChanges,1);
     assert.deepEqual(f.persisted,[]);
 });
-test('typing during explicit whole-file replacement remains pending and is persisted before the entity event',async()=>{
-    choice='Upload changes';const f=uploadFixture();const upload=f.socket.api.uploadFile;
-    f.socket.api.uploadFile=async(...args)=>{f.setContent('newer typing');return upload(...args);};
-    f.socket._eventEmitter.on('reciveNewDoc',()=>assert.equal(f.persisted.length,1));
+test('alternative uploads never offer an unsafe original replacement action',async()=>{
+    choice=undefined;const f=uploadFixture();
+    await assert.rejects(f.socket.uploadToVFS(),/cancelled/);
+    const [message,options,...actions]=confirmations.at(-1);
+    assert.equal(options.modal,true);
+    assert.deepEqual(actions,['Upload recovery copies']);
+    assert.match(message,/cannot safely replace/i);
+    assert.equal(f.calls.length,0);assert.equal(f.socket.unSyncedChanges,1);
+});
+test('an obsolete replacement choice fails closed without uploading or clearing a pending original',async()=>{
+    choice='Upload changes';const f=uploadFixture();
+    await assert.rejects(f.socket.uploadToVFS(),/cancelled/);
+    assert.deepEqual(f.calls,[]);assert.deepEqual(f.persisted,[]);assert.deepEqual(f.events,[]);
+    assert.equal(f.socket.unSyncedChanges,1);
+});
+test('a collaborator edit at upload time is preserved and only a separately named recovery copy is written',async()=>{
+    choice='Upload recovery copies';const f=uploadFixture();const upload=f.socket.api.uploadFile;
+    const remote=new Map([['main.tex','remote base']]);
+    f.socket.api.uploadFile=async(...args)=>{
+        remote.set('main.tex','concurrent collaborator edit');
+        remote.set(args[3],Buffer.from(args[4]).toString());
+        return upload(...args);
+    };
     await f.socket.uploadToVFS();
-    assert.equal(f.calls[0].name,'main.tex');assert.equal(f.socket.unSyncedChanges,1);
-    assert.deepEqual(f.persisted,[['main.tex','newer typing','pending local draft']]);
-    assert.deepEqual(f.calls[1],{recovery:true});
+    assert.equal(remote.get('main.tex'),'concurrent collaborator edit');
+    assert.equal(remote.get(f.calls[0].name),'pending local draft');
+    assert.notEqual(f.calls[0].name,'main.tex');assert.equal(f.socket.unSyncedChanges,1);
+    assert.deepEqual(f.persisted,[]);
+});
+test('typing while a recovery copy uploads remains pending without committing or replacing the original',async()=>{
+    choice='Upload recovery copies';const f=uploadFixture();const upload=f.socket.api.uploadFile;
+    f.socket.api.uploadFile=async(...args)=>{f.setContent('newer typing');return upload(...args);};
+    await f.socket.uploadToVFS();
+    assert.notEqual(f.calls[0].name,'main.tex');assert.equal(f.calls[0].bytes,'pending local draft');
+    assert.equal(f.socket.unSyncedChanges,1);assert.deepEqual(f.persisted,[]);
+    assert.equal(f.calls.length,1);assert.equal(f.events.length,1);
+});
+test('disconnect while reading a recovery draft prevents a late upload',async()=>{
+    choice='Upload recovery copies';const f=uploadFixture();let finishRead;
+    f.socket._vfs.openFile=()=>new Promise(resolve=>{finishRead=resolve;});
+    const pending=f.socket.uploadToVFS();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(typeof finishRead,'function');f.socket.disconnected=true;
+    finishRead(Buffer.from('pending local draft'));
+    await assert.rejects(pending,/failed|cancelled|closed/);
+    assert.deepEqual(f.calls,[]);assert.deepEqual(f.events,[]);assert.equal(f.socket.unSyncedChanges,1);
 });
 test('recovery copy names are bounded for long Unicode names and unusually long suffixes',async()=>{
     choice='Upload recovery copies';

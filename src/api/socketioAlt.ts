@@ -376,20 +376,17 @@ export class SocketIOAlt {
     private async uploadToVFSOnce() {
         if (!this.unSyncedChanges) { return; }
         const copies = vscode.l10n.t('Upload recovery copies');
-        const upload = vscode.l10n.t('Upload changes');
         const choice = await vscode.window.showWarningMessage(
-            vscode.l10n.t('Overleaf cannot atomically check revisions for alternative-mode uploads. Recovery copies create new files and leave the originals and pending drafts unchanged. Upload changes replaces the originals and can overwrite concurrent edits; use it only after collaborators have stopped editing.'),
-            {modal: true}, copies, upload,
+            vscode.l10n.t('Alternative connection mode cannot safely replace original files while collaborators may be editing. Upload recovery copies creates separate files and leaves originals and pending drafts unchanged. Reconnect normally to synchronize changes to the original documents.'),
+            {modal: true}, copies,
         );
-        if (choice!==upload && choice!==copies) { throw new Error('Upload cancelled; pending changes are retained'); }
-        const recoveryCopies = choice===copies;
+        // Never admit the old original-replacement action: this HTTP endpoint
+        // upserts by name and cannot compare the document revision atomically.
+        if (choice!==copies) { throw new Error('Upload cancelled; pending changes are retained'); }
         const vfs = await this.vfs;
-        // Replacement needs authoritative history. A new recovery copy does
-        // not modify the original, so unavailable history must not block it.
-        // Still let an already-running poll settle before mutating the tree.
-        if (!recoveryCopies) {
-            await this.refreshVFS();
-        } else if (this.refreshPromise) {
+        // New recovery copies do not modify originals. Unavailable history
+        // must not block them, but settle any active poll before tree mutation.
+        if (this.refreshPromise) {
             await this.refreshPromise.catch(error => {
                 logDiagnostic('SocketIOAlt', 'copy.history_refresh_failed', {}, error);
             });
@@ -401,7 +398,7 @@ export class SocketIOAlt {
             // Alternative-socket uploads are part of the background sync path;
             // keep progress out of popup notifications to avoid routine spam.
             location: vscode.ProgressLocation.Window,
-            title: vscode.l10n.t('Uploading Changes'),
+            title: vscode.l10n.t('Uploading Recovery Copies'),
             cancellable: true,
         }, async (progress, token) => {
             const failures: string[] = [];
@@ -413,6 +410,7 @@ export class SocketIOAlt {
                 if (token.isCancellationRequested || this.disconnected) { throw new Error('Upload cancelled; pending changes are retained'); }
                 try {
                     const fileContent = Buffer.from(await vfs.openFile( vfs.pathToUri(path) ));
+                    if (token.isCancellationRequested || this.disconnected) { throw new Error('Upload cancelled; pending changes are retained'); }
                     progress.report({increment, message:`${path}`});
                     // Keep the extension for Overleaf's file-type detection. A
                     // fresh unpredictable name prevents a retry replacing a
@@ -423,35 +421,25 @@ export class SocketIOAlt {
                     const stem = hasExtension ? filename.slice(0, dot) : filename;
                     const suffix = `.recovery-${randomUUID()}${extension}`;
                     let boundedStem = '';
-                    if (recoveryCopies) {
-                        for (const character of stem) {
-                            if (boundedStem.length + character.length > 150 - suffix.length) { break; }
-                            boundedStem += character;
-                        }
+                    for (const character of stem) {
+                        if (boundedStem.length + character.length > 150 - suffix.length) { break; }
+                        boundedStem += character;
                     }
-                    const uploadName = recoveryCopies ? boundedStem + suffix : filename;
+                    const uploadName = boundedStem + suffix;
+                    if (uploadName===filename) { throw new Error('Recovery copy must use a separate filename'); }
                     const uploaded = await this.api.uploadFile(this.identity, this.projectId, parentFolderId, uploadName, fileContent);
                     if (uploaded.type!=='success' || !uploaded.entity) { throw new Error('Upload was not confirmed'); }
-                    if (recoveryCopies && uploaded.entity.name!==uploadName) { throw new Error('Recovery copy name was not confirmed'); }
-                    const currentContent = recoveryCopies ? undefined : Buffer.from(await vfs.openFile(vfs.pathToUri(path)));
-                    if (currentContent) {
-                        // Persist edits before publishing a replacement entity.
-                        await vfs.persistTextDocumentDraft(vfs.pathToUri(path), currentContent.toString('utf8'), fileContent.toString('utf8'));
-                    }
+                    if (uploaded.entity.name!==uploadName) { throw new Error('Recovery copy name was not confirmed'); }
                     const fileEntity = uploaded.entity;
-                    // update local entityId
+                    // Publish the new recovery copy in the project tree.
                     if (fileEntity._type==='doc') {
                         this.emitEvent('reciveNewDoc', parentFolderId, fileEntity);
                     } else if (fileEntity._type==='file') {
                         this.emitEvent('reciveNewFile', parentFolderId, fileEntity);
                     }
-                    if (recoveryCopies) {
-                        uploadedCopies.push(uploadName);
-                        // This copy is not a commit of the original document.
-                        // Preserve its base, journal and pending path.
-                        continue;
-                    }
-                    if (currentContent?.equals(fileContent)) { delete this.localChangesPath[path]; }
+                    uploadedCopies.push(uploadName);
+                    // A recovery copy is not a commit of the original. Keep
+                    // its base, journal and pending path, including newer typing.
                 } catch (error) {
                     failures.push(path);
                     logDiagnostic('SocketIOAlt', 'upload.failed', {path}, error);
@@ -460,13 +448,8 @@ export class SocketIOAlt {
                 }
             }
             if (failures.length > 0) { throw new Error(`${failures.length} uploads failed; pending changes are retained`); }
-            if (recoveryCopies) {
-                void vscode.window.showInformationMessage(vscode.l10n.t('{count} recovery copies uploaded. Original files and pending drafts are unchanged.', {count: uploadedCopies.length}));
-                return;
-            }
-            // update local version
-            await vfs.requestRealtimeRecovery('document_version_mismatch');
-            return Promise.resolve();
+            void vscode.window.showInformationMessage(vscode.l10n.t('{count} recovery copies uploaded. Original files and pending drafts are unchanged.', {count: uploadedCopies.length}))
+                .then(undefined, error => logDiagnostic('SocketIOAlt', 'copy.notification_failed', {}, error));
         });
     }
 

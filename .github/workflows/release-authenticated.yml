@@ -1,0 +1,32 @@
+name: Genuine self-hosted Overleaf acceptance
+permissions:
+  contents: read
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [codex/release-platform-audit-2026-11-19]
+    paths:
+      - .github/workflows/release-authenticated.yml
+      - scripts/run-self-hosted-acceptance.cjs
+      - test/integration/selfHostedAcceptance*.cjs
+jobs:
+  authenticated:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        vscode: ['1.80.0', stable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci && npm ci --prefix views/chat-view && npm run compile
+      - name: Genuine CE authentication, editing, reconnect and restart
+        run: xvfb-run -a node scripts/run-self-hosted-acceptance.cjs ${{ matrix.vscode }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: authenticated-overleaf-${{ matrix.vscode }}
+          path: output/release-audit/self-hosted-*.json

@@ -1,0 +1,10 @@
+{
+  "name": "orbitleaf-self-hosted-acceptance-driver",
+  "publisher": "orbitleaf-audit",
+  "version": "0.0.1",
+  "private": true,
+  "engines": {"vscode": "^1.80.0"},
+  "main": "index.cjs",
+  "activationEvents": ["onStartupFinished"],
+  "extensionDependencies": ["AstroJulio.orbitleaf"]
+}

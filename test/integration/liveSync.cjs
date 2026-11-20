@@ -199,6 +199,9 @@ exports.run = async () => {
         assert.equal(copy.docLines.join('\n'), copyDraft);
         effects.push({scenario: 'alternative-recovery-copy-with-concurrent-edit', passed: true,
             originalsPreserved: true, draftRemainsPending: true});
+        if (process.env.OVERLEAF_SELF_HOSTED_ACCEPTANCE === '1') {
+            await require('./selfHostedAcceptanceExtras.cjs').run({vfs, uri, docId, projectId, effects});
+        }
         const report = {status: 'passed', vscode: vscode.version, extensionPathVerified: true,
             elapsedMs: Date.now() - started, effects,
             limitation: 'Two real server clients use one existing account; separate-account authorization still needs a second test account.'};
