@@ -52,9 +52,10 @@ async function main() {
             environment: {OVERLEAF_APP_NAME: 'Orbitleaf Disposable Release Acceptance', OVERLEAF_SITE_URL: url,
                 OVERLEAF_MONGO_URL: 'mongodb://mongo/sharelatex?replicaSet=overleaf',
                 OVERLEAF_REDIS_HOST: 'redis', REDIS_HOST: 'redis', EMAIL_CONFIRMATION_DISABLED: 'true',
+                OVERLEAF_INVITE_TOKEN_SECRET: crypto.randomBytes(32).toString('base64'),
                 ENABLE_CONVERSIONS: 'true', SANDBOXED_COMPILES: 'false'}}},
         volumes: {mongo: {}, redis: {}, overleaf: {}}};
-    fs.writeFileSync(composePath, JSON.stringify(compose, null, 2));
+    fs.writeFileSync(composePath, JSON.stringify(compose, null, 2), {mode: 0o600});
     const docker = (args, options) => command('docker', ['compose', '-p', project, '-f', composePath, ...args], options);
     const waitFor = async (predicate, label, timeout = 300000) => {
         const until = Date.now() + timeout;
