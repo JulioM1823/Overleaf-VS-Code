@@ -1,8 +1,7 @@
 diff --git a/build/pdf.js b/build/pdf.js
-index 8ec1e8f..b435c79 100644
 --- a/build/pdf.js
 +++ b/build/pdf.js
-@@ -362,6 +362,13 @@ const PasswordResponses = {
+@@ -362,6 +362,13 @@
    INCORRECT_PASSWORD: 2
  };
  exports.PasswordResponses = PasswordResponses;
@@ -16,7 +15,7 @@ index 8ec1e8f..b435c79 100644
  let verbosity = VerbosityLevel.WARNINGS;
  function setVerbosityLevel(level) {
    if (Number.isInteger(level)) {
-@@ -6781,6 +6788,8 @@ class CanvasGraphics {
+@@ -6781,6 +6788,8 @@
      this._cachedScaleForStroking = [-1, 0];
      this._cachedGetSinglePixelWidth = null;
      this._cachedBitmapsMap = new Map();
@@ -25,7 +24,7 @@ index 8ec1e8f..b435c79 100644
    }
    getObject(data, fallback = null) {
      if (typeof data === "string") {
-@@ -6797,7 +6806,7 @@ class CanvasGraphics {
+@@ -6797,7 +6806,7 @@
      const width = this.ctx.canvas.width;
      const height = this.ctx.canvas.height;
      const savedFillStyle = this.ctx.fillStyle;
@@ -34,7 +33,7 @@ index 8ec1e8f..b435c79 100644
      this.ctx.fillRect(0, 0, width, height);
      this.ctx.fillStyle = savedFillStyle;
      if (transparency) {
-@@ -6839,6 +6848,36 @@ class CanvasGraphics {
+@@ -6839,6 +6848,36 @@
          return i;
        }
        fnId = fnArray[i];
@@ -71,7 +70,7 @@ index 8ec1e8f..b435c79 100644
        if (fnId !== _util.OPS.dependency) {
          this[fnId].apply(this, argsArray[i]);
        } else {
-@@ -7500,7 +7539,7 @@ class CanvasGraphics {
+@@ -7500,7 +7539,7 @@
      }
      return (0, _util.shadow)(this, "isFontSubpixelAAEnabled", enabled);
    }
@@ -80,7 +79,7 @@ index 8ec1e8f..b435c79 100644
      const current = this.current;
      const font = current.font;
      if (font.isType3Font) {
-@@ -7605,7 +7644,12 @@ class CanvasGraphics {
+@@ -7605,7 +7644,12 @@
        }
        if (this.contentVisible && (glyph.isInFont || font.missingFile)) {
          if (simpleFillText && !accent) {
@@ -93,7 +92,7 @@ index 8ec1e8f..b435c79 100644
          } else {
            this.paintChar(character, scaledX, scaledY, patternTransform);
            if (accent) {
-@@ -8888,6 +8932,7 @@ GlobalWorkerOptions.workerPort = null;
+@@ -8888,6 +8932,7 @@
  GlobalWorkerOptions.workerSrc = "";
  
  /***/ }),
@@ -101,7 +100,7 @@ index 8ec1e8f..b435c79 100644
  /* 15 */
  /***/ ((__unused_webpack_module, exports, __w_pdfjs_require__) => {
  
-@@ -11426,7 +11471,7 @@ class SVGGraphics {
+@@ -11426,7 +11471,7 @@
            this.setFont(args);
            break;
          case _util.OPS.showText:
@@ -110,7 +109,7 @@ index 8ec1e8f..b435c79 100644
            break;
          case _util.OPS.showSpacedText:
            this.showText(args[0]);
-@@ -17651,6 +17696,34 @@ Object.defineProperty(exports, "GlobalWorkerOptions", ({
+@@ -17651,6 +17696,34 @@
      return _worker_options.GlobalWorkerOptions;
    }
  }));
@@ -146,10 +145,9 @@ index 8ec1e8f..b435c79 100644
    enumerable: true,
    get: function () {
 diff --git a/web/viewer.js b/web/viewer.js
-index 6d1fb61..7feba07 100644
 --- a/web/viewer.js
 +++ b/web/viewer.js
-@@ -8387,7 +8387,7 @@ class PDFViewer {
+@@ -8387,7 +8387,7 @@
      this.#annotationEditorMode = options.annotationEditorMode ?? _pdfjsLib.AnnotationEditorType.NONE;
      this.imageResourcesPath = options.imageResourcesPath || "";
      this.enablePrintAutoRotate = options.enablePrintAutoRotate || false;
@@ -158,17 +156,29 @@ index 6d1fb61..7feba07 100644
      if (options.useOnlyCssZoom) {
        console.error("useOnlyCssZoom was removed, please use `maxCanvasPixels = 0` instead.");
        options.maxCanvasPixels = 0;
-@@ -13355,6 +13355,7 @@
+@@ -13329,6 +13329,7 @@
+   ctx.fillRect(0, 0, scratchCanvas.width, scratchCanvas.height);
+   ctx.restore();
+   return Promise.all([pdfDocument.getPage(pageNumber), printAnnotationStoragePromise]).then(function ([pdfPage, printAnnotationStorage]) {
++    activeServiceOnEntry.throwIfInactive();
+     const renderContext = {
+       canvasContext: ctx,
+       transform: [PRINT_UNITS, 0, 0, PRINT_UNITS, 0, 0],
+@@ -13355,6 +13356,8 @@
      this.l10n = l10n;
      this.currentPage = -1;
      this.scratchCanvas = document.createElement("canvas");
 +    this._objectUrls = new Set();
++    this._pageEncoder = globalThis.OverleafPdfPrintEncoder?.create() || null;
    }
    layout() {
      this.throwIfInactive();
-@@ -13377,6 +13378,10 @@
+@@ -13376,7 +13379,13 @@
+     if (activeService !== this) {
        return;
      }
++    this._pageEncoder?.dispose();
++    this._pageEncoder = null;
      this.printContainer.textContent = "";
 +    for (const url of this._objectUrls) {
 +      URL.revokeObjectURL(url);
@@ -177,7 +187,39 @@ index 6d1fb61..7feba07 100644
      const body = document.querySelector("body");
      body.removeAttribute("data-pdfjsprinting");
      if (this.pageStyleSheet) {
-@@ -13417,20 +13422,26 @@
+@@ -13392,46 +13401,66 @@
+       }
+     });
+   }
+-  renderPages() {
++  async renderPages() {
++    this.throwIfInactive();
+     if (this.pdfDocument.isPureXfa) {
+       (0, _print_utils.getXfaHtmlForPrinting)(this.printContainer, this.pdfDocument);
+-      return Promise.resolve();
++      return;
+     }
+     const pageCount = this.pagesOverview.length;
+-    const renderNextPage = (resolve, reject) => {
++    while (true) {
+       this.throwIfInactive();
+       if (++this.currentPage >= pageCount) {
+         renderProgress(pageCount, pageCount, this.l10n);
+-        resolve();
+         return;
+       }
+       const index = this.currentPage;
+       renderProgress(index, pageCount, this.l10n);
+-      renderPage(this, this.pdfDocument, index + 1, this.pagesOverview[index], this._printResolution, this._optionalContentConfigPromise, this._printAnnotationStoragePromise).then(this.useRenderedPage.bind(this)).then(function () {
+-        renderNextPage(resolve, reject);
+-      }, reject);
+-    };
+-    return new Promise(renderNextPage);
++      await renderPage(this, this.pdfDocument, index + 1, this.pagesOverview[index], this._printResolution, this._optionalContentConfigPromise, this._printAnnotationStoragePromise);
++      await this.useRenderedPage();
++    }
+   }
+   useRenderedPage() {
      this.throwIfInactive();
      const img = document.createElement("img");
      const scratchCanvas = this.scratchCanvas;
@@ -193,22 +235,42 @@ index 6d1fb61..7feba07 100644
      wrapper.append(img);
      this.printContainer.append(wrapper);
 -    return new Promise(function (resolve, reject) {
-+    return new Promise((resolve, reject) => {
-       img.onload = resolve;
-       img.onerror = reject;
-+      if ("toBlob" in scratchCanvas) {
-+        scratchCanvas.toBlob(blob => {
-+          if (!this.active || !blob) {
-+            reject(new Error("Print page was cancelled or could not be encoded."));
-+            return;
-+          }
-+          const url = URL.createObjectURL(blob);
+-      img.onload = resolve;
+-      img.onerror = reject;
+-    });
++    const displayEncodedPage = image => {
++      if (!this.active || !image) {
++        throw new Error("Print page was cancelled or could not be encoded.");
++      }
++      return new Promise((resolve, reject) => {
++        img.onload = resolve;
++        img.onerror = reject;
++        if (typeof image === "string") {
++          img.src = image;
++        } else {
++          const url = URL.createObjectURL(image);
 +          this._objectUrls.add(url);
 +          img.src = url;
-+        });
++        }
++      });
++    };
++    const legacyEncode = () => new Promise((resolve, reject) => {
++      if ("toBlob" in scratchCanvas) {
++        scratchCanvas.toBlob(resolve);
 +      } else {
-+        img.src = scratchCanvas.toDataURL();
++        try { resolve(scratchCanvas.toDataURL()); }
++        catch (error) { reject(error); }
 +      }
-     });
++    });
++    if (this._pageEncoder) {
++      return this._pageEncoder.encode(scratchCanvas).catch(error => {
++        this.throwIfInactive();
++        this._pageEncoder?.dispose();
++        this._pageEncoder = null;
++        return legacyEncode();
++      }).then(displayEncodedPage);
++    }
++    return legacyEncode().then(displayEncodedPage);
    }
    performPrint() {
+     this.throwIfInactive();

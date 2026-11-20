@@ -416,14 +416,24 @@ export class SocketIOAlt {
                     // fresh unpredictable name prevents a retry replacing a
                     // previously uploaded copy after an uncertain response.
                     const dot = filename.lastIndexOf('.');
-                    const hasExtension = dot>0 && filename.length - dot<=20;
+                    const hasExtension = dot>0 && filename.length>dot+1 && filename.length - dot<=20;
+                    // Unusually long suffixes are part of the bounded stem;
+                    // only a normal extension is retained after the unique ID.
                     const extension = hasExtension ? filename.slice(dot) : '';
                     const stem = hasExtension ? filename.slice(0, dot) : filename;
                     const suffix = `.recovery-${randomUUID()}${extension}`;
+                    const suffixBytes = Buffer.byteLength(suffix, 'utf8');
+                    if (suffix.length>150 || suffixBytes>255) { throw new Error('Recovery filename suffix exceeds safe limits'); }
                     let boundedStem = '';
+                    let boundedStemBytes = 0;
                     for (const character of stem) {
-                        if (boundedStem.length + character.length > 150 - suffix.length) { break; }
+                        const characterBytes = Buffer.byteLength(character, 'utf8');
+                        // The server counts UTF-16 units; native Linux filenames
+                        // also require a UTF-8 byte bound. Never split a codepoint.
+                        if (boundedStem.length + character.length > 150 - suffix.length
+                            || boundedStemBytes + characterBytes > 255 - suffixBytes) { break; }
                         boundedStem += character;
+                        boundedStemBytes += characterBytes;
                     }
                     const uploadName = boundedStem + suffix;
                     if (uploadName===filename) { throw new Error('Recovery copy must use a separate filename'); }

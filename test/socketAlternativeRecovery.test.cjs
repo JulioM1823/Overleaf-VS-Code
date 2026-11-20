@@ -2,6 +2,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const Module = require('node:module');
 const originalLoad = Module._load;
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
 let choice;
 const notices=[];
 const confirmations=[];
@@ -191,4 +194,30 @@ test('rejected alternative bootstrap reports connection failure without an unhan
     let connected=false;socket.on('connect',()=>{connected=true;});
     await new Promise(resolve=>socket.on('connect_failed',resolve));
     assert.equal(connected,false);socket.disconnect();
+});
+
+
+test('recovery copy names fit native UTF8 byte limits and retain full original/draft content',async t=>{
+    choice='Upload recovery copies';const root=await fs.mkdtemp(path.join(os.tmpdir(),'recovery-copy-native-'));
+    t.after(()=>fs.rm(root,{recursive:true,force:true}));
+    const names=['漢'.repeat(80)+'.tex','r.'+'漢'.repeat(80),'😀'.repeat(60)+'.tex','漢'.repeat(75)+'.λογ','name.'+'x'.repeat(140)];
+    for (const name of names) {
+        await fs.writeFile(path.join(root,name),'original remote content');
+        const f=uploadFixture(name);const upload=f.socket.api.uploadFile;
+        f.socket.api.uploadFile=async(...args)=>{
+            assert(args[3].length<=150,'Server filename length limit');
+            assert(Buffer.byteLength(args[3],'utf8')<=255,'Native filename UTF8 byte limit');
+            await fs.writeFile(path.join(root,args[3]),args[4]);
+            return upload(...args);
+        };
+        await f.socket.uploadToVFS();
+        const copied=f.calls[0].name;
+        assert.notEqual(copied,name);
+        if (name.endsWith('.tex')) { assert(copied.endsWith('.tex')); }
+        if (name.endsWith('.λογ')) { assert(copied.endsWith('.λογ')); }
+        if (name==='r.'+'漢'.repeat(80)) { assert.match(copied,/\.recovery-[a-f0-9-]+$/); }
+        assert.equal(await fs.readFile(path.join(root,name),'utf8'),'original remote content');
+        assert.equal(await fs.readFile(path.join(root,copied),'utf8'),'pending local draft');
+        assert.equal(f.socket.unSyncedChanges,1);assert.deepEqual(f.persisted,[]);
+    }
 });

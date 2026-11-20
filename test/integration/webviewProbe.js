@@ -14,6 +14,9 @@
     let downloadedBytes = 0;
     let printedPages = 0;
     let printElapsedMs = 0;
+    let printPageTimings = [];
+    let printWorkerPages = 0;
+    let printPixelMatches = 0;
     const Original = globalThis.OverleafPdfDocumentLoader;
     globalThis.OverleafPdfDocumentLoader = class extends Original {
         constructor(create, display, reportError) {
@@ -73,8 +76,51 @@
                 const started = performance.now();
                 const useRenderedPage = service.useRenderedPage.bind(service);
                 printedPages = 0;
+                printPageTimings = [];
+                printWorkerPages = 0;
+                printPixelMatches = 0;
+                let pageTiming;
+                const workerEncode = service._pageEncoder?.encode.bind(service._pageEncoder);
+                if (workerEncode) {
+                    service._pageEncoder.encode = async canvas => {
+                        const encodingStarted = performance.now();
+                        const blob = await workerEncode(canvas);
+                        if (pageTiming) { pageTiming.workerEncodeMs = performance.now() - encodingStarted; }
+                        printWorkerPages++;
+                        return blob;
+                    };
+                }
+                const toBlob = service.scratchCanvas.toBlob?.bind(service.scratchCanvas);
+                if (toBlob) {
+                    service.scratchCanvas.toBlob = (callback, ...args) => {
+                        const encodingStarted = performance.now();
+                        return toBlob(blob => {
+                            if (pageTiming) { pageTiming.toBlobMs = performance.now() - encodingStarted; }
+                            callback(blob);
+                        }, ...args);
+                    };
+                }
                 service.useRenderedPage = async () => {
+                    pageTiming = {};
+                    const pageStarted = performance.now();
                     await useRenderedPage();
+                    pageTiming.totalMs = performance.now() - pageStarted;
+                    printPageTimings.push(pageTiming);
+                    // Verify that lossless encoding preserves every rendered pixel.
+                    const scratch = service.scratchCanvas;
+                    const image = document.getElementById('printContainer').lastElementChild.querySelector('img');
+                    const verification = document.createElement('canvas');
+                    verification.width = scratch.width;
+                    verification.height = scratch.height;
+                    const context = verification.getContext('2d');
+                    context.drawImage(image, 0, 0);
+                    const expected = scratch.getContext('2d').getImageData(0, 0, scratch.width, scratch.height).data;
+                    const actual = context.getImageData(0, 0, scratch.width, scratch.height).data;
+                    if (!actual.every((value, index) => value===expected[index])) {
+                        throw new Error('Print image pixels differ from the rendered page');
+                    }
+                    printPixelMatches++;
+                    verification.width = verification.height = 0;
                     printedPages++;
                     api.postMessage({type: 'soakProgress', phase: 'print', pages: printedPages});
                 };
@@ -103,7 +149,7 @@
                 scrollTop: document.getElementById('viewerContainer').scrollTop,
                 hidden: document.hidden,
                 visibility: PDFViewerApplication.pdfViewer._getVisiblePages().views.map(page => page.id),
-                downloadedBytes, printedPages, printElapsedMs,
+                downloadedBytes, printedPages, printElapsedMs, printPageTimings, printWorkerPages, printPixelMatches,
                 themeButtons: document.querySelectorAll('[id^="theme-"]').length,
                 scripting: PDFViewerApplicationOptions.get('enableScripting'),
                 eval: PDFViewerApplicationOptions.get('isEvalSupported'),

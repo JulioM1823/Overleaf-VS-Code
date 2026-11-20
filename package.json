@@ -2,7 +2,7 @@
   "name": "orbitleaf",
   "displayName": "Overleaf-VS Code",
   "description": "%extension.description%",
-  "version": "0.16.7",
+  "version": "0.16.8",
   "icon": "resources/icons/orbitleaf.png",
   "author": {
     "name": "iamhyc",

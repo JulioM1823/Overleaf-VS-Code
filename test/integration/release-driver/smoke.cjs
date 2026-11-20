@@ -132,6 +132,8 @@ exports.run = async () => {
             'views/pdf-viewer/index.css',
             'views/pdf-viewer/syncHighlight.js',
             'views/pdf-viewer/documentLoader.js',
+            'views/pdf-viewer/printEncoder.js',
+            'views/pdf-viewer/printEncoderWorker.js',
             'data/vendor/languages/latex-language-configuration.json',
         ];
         for (const asset of assets) { installedFile(extensionPath, asset); }
@@ -188,6 +190,41 @@ exports.run = async () => {
         }
         report.checks.push('actual project manager view focused in a clean first-run profile');
         report.checks.push('actual tree state contains the default official server and no authenticated login metadata (test-host in-memory state)');
+
+        // Activation alone does not exercise the native globalStorageUri scheme.
+        // Use the target's already-loaded store with synthetic data, independently
+        // of its VFS/network/account machinery, inside this empty test profile.
+        assert.equal(vscode.workspace.workspaceFolders?.length || 0, 0, 'Recovery storage check requires an empty workspace');
+        const {ProjectOfflineStore} = loadedInstalledModule(extensionPath, 'out/offline/projectOfflineStore.js').exports;
+        const recoveryUri = vscode.Uri.from({scheme: 'overleaf-workshop', authority: 'synthetic.invalid',
+            path: '/ReleaseStorage', query: new URLSearchParams({user: 'synth', project: 'synth'}).toString()});
+        const makeStore = () => new ProjectOfflineStore(observedContext, recoveryUri, 'synth', 'ReleaseStorage', 'synthetic.invalid');
+        const firstStore = makeStore();
+        const secondStore = makeStore();
+        const now = new Date().toISOString();
+        const queued = {version: 1, lastUpdatedAt: now, operations: [{
+            id: 'installed-host-pending-chat', createdAt: now, kind: 'chat.send',
+            payload: {content: 'Synthetic pending release-check message', localMessageId: 'synthetic-local-message'},
+        }]};
+        try {
+            const location = await firstStore.describeStorage();
+            assert.equal(location.storageKind, 'global', 'Recovery check must not touch a workspace');
+            assert.equal(location.storageRoot.scheme, 'file', 'Recovery must use the native filesystem backend');
+            assert.equal(location.operationLogUri.scheme, 'file');
+            await firstStore.saveOperationQueue(queued);
+            const persisted = JSON.parse(fs.readFileSync(location.operationLogUri.fsPath, 'utf8'));
+            assert.deepEqual(persisted.operations, queued.operations, 'Native filesystem must contain the pending operation');
+            await assert.rejects(secondStore.loadOperationQueue(), /another VS Code window/,
+                'A second native store must not bypass exclusive writer ownership');
+            await firstStore.close();
+            const reopened = await secondStore.loadOperationQueue();
+            assert.deepEqual(reopened.operations, queued.operations, 'Pending operation must survive ownership handoff');
+            report.recoveryStorage = {inputScheme: observedContext.globalStorageUri.scheme,
+                nativeScheme: location.storageRoot.scheme, exclusiveWriterPreserved: true, pendingOperationRetained: true};
+        } finally {
+            await Promise.all([firstStore.close(), secondStore.close()]);
+        }
+        report.checks.push('actual installed recovery store writes native files, excludes a second writer, and retains pending work after handoff');
         report.status = 'passed';
         save();
     } catch (error) {

@@ -160,10 +160,16 @@ exports.run = async function () {
         await waitFor(undefined, state => state.pagesReady === true);
         const largePrint = await inspect(undefined, 'print');
         assert.equal(largePrint.printedPages, 60);
+        assert.equal(largePrint.printPixelMatches, 60, 'Every print page must preserve its raster pixels');
+        if (process.env.OVERLEAF_REQUIRE_PRINT_WORKER==='1') {
+            assert.equal(largePrint.printWorkerPages, 60, 'Print encoding must run in the worker');
+        }
         assert.equal(largePrint.blobUrlsActive, largeDownload.blobUrlsActive, 'Large print must release all image URLs');
         for (let index = 0; index < 3; index++) {
             const repeated = await inspect(undefined, 'print');
             assert.equal(repeated.printedPages, 60);
+            assert.equal(repeated.printPixelMatches, 60);
+            if (process.env.OVERLEAF_REQUIRE_PRINT_WORKER==='1') { assert.equal(repeated.printWorkerPages, 60); }
             assert.equal(repeated.blobUrlsActive, largeDownload.blobUrlsActive);
         }
         checkpoints.push({phase: 'multipage-download-and-print', ...largePrint});

@@ -29,7 +29,7 @@ async function main() {
     const icon = read(pkg.icon);
     assert.equal(icon.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
     assert(icon.readUInt32BE(16) >= 128 && icon.readUInt32BE(20) >= 128);
-    for (const file of ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'source/README.md', 'out/extension.js', 'views/chat-view/dist/index.html', 'views/pdf-viewer/vendor/LICENSE', 'views/pdf-viewer/vendor/build/pdf.js', 'views/pdf-viewer/vendor/build/pdf.worker.js', 'data/vendor/languages/latex-language-configuration.json']) read(file);
+    for (const file of ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'source/README.md', 'out/extension.js', 'views/chat-view/dist/index.html', 'views/pdf-viewer/printEncoder.js', 'views/pdf-viewer/printEncoderWorker.js', 'views/pdf-viewer/vendor/LICENSE', 'views/pdf-viewer/vendor/build/pdf.js', 'views/pdf-viewer/vendor/build/pdf.worker.js', 'data/vendor/languages/latex-language-configuration.json']) read(file);
     assert(read('LICENSE').toString().includes('GNU AFFERO GENERAL PUBLIC LICENSE'));
     const source = json('source/manifest.json');
     assert.equal(source.extensionId, `${pkg.publisher}.${pkg.name}`);
@@ -43,7 +43,7 @@ async function main() {
         assert(file, `Source missing ${entry.path}`);
         assert.equal(hash(await file.async('nodebuffer')), entry.sha256, `Source archive mismatch: ${entry.path}`);
     }
-    for (const required of ['src/extension.ts', 'scripts/install-vendor.cjs', 'scripts/package-source.cjs', 'package-lock.json', 'views/chat-view/package-lock.json', 'scripts/vendor-patches/pdfjs-3.10.111-dist.patch']) assert(zip.file(required), `Source missing ${required}`);
+    for (const required of ['src/extension.ts', 'views/pdf-viewer/printEncoder.js', 'views/pdf-viewer/printEncoderWorker.js', 'scripts/install-vendor.cjs', 'scripts/package-source.cjs', 'package-lock.json', 'views/chat-view/package-lock.json', 'scripts/vendor-patches/pdfjs-3.10.111-dist.patch']) assert(zip.file(required), `Source missing ${required}`);
     console.log(JSON.stringify({status:'passed', extensionId:source.extensionId, version:pkg.version, sourceFiles:source.files.length, sourceSha256:source.sha256}));
 }
 main().catch(error => { console.error(error.message); process.exitCode = 1; });

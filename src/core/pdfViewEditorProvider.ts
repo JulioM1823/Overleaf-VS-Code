@@ -429,9 +429,10 @@ export class PdfViewEditorProvider implements vscode.CustomEditorProvider<PdfDoc
         const workerScript = `<script src="${patchPath('vendor','build','pdf.worker.js')}"></script>`;
         const syncHighlightScript = `<script src="${patchPath('syncHighlight.js')}"></script>`;
         const documentLoaderScript = `<script src="${patchPath('documentLoader.js')}"></script>`;
+        const printEncoderScript = `<script src="${patchPath('printEncoder.js')}"></script>`;
         const customScript = `<script src="${patchPath('index.js')}"></script>`;
         const customStyle = `<link rel="stylesheet" href="${patchPath('index.css')}" />`;
-        html = html.replace(/\<\/head\>/, `${workerScript}\n${syncHighlightScript}\n${documentLoaderScript}\n${customScript}\n${customStyle}\n</head>`);
+        html = html.replace(/\<\/head\>/, `${workerScript}\n${syncHighlightScript}\n${documentLoaderScript}\n${printEncoderScript}\n${customScript}\n${customStyle}\n</head>`);
 
         return html;
     }

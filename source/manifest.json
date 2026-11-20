@@ -1,8 +1,8 @@
 {
   "extensionId": "AstroJulio.orbitleaf",
-  "version": "0.16.7",
-  "archive": "orbitleaf-0.16.7-source.zip",
-  "sha256": "d07e3d8b1affa34b8f9673fd0f966cf14a4c45641611a296dc60d2cd66e83645",
+  "version": "0.16.8",
+  "archive": "orbitleaf-0.16.8-source.zip",
+  "sha256": "eb65e65319f50471a48a961328ce8614d3cd787c5a2f44730d05f7855c6da25d",
   "files": [
     {
       "path": ".eslintrc.json",
@@ -35,9 +35,14 @@
       "sha256": "285551d16be7fff831ad820c407cbdd40c29cecd6bb0c474a14433c587c6a6d7"
     },
     {
+      "path": ".github/workflows/release-authenticated.yml",
+      "bytes": 1040,
+      "sha256": "bf69c3f4c7f3e6d6cf1f8bf0ef9b60be39e434e4f8bde9d04f16645809f4f7da"
+    },
+    {
       "path": ".github/workflows/vsce-package.yml",
-      "bytes": 2218,
-      "sha256": "4923b5762892c80c2fa192826120e0bfcc025323c129f625f920af6fed9df032"
+      "bytes": 2268,
+      "sha256": "1cba117ad0a67455518be9999a9da97f4d0682d9e98a142ca9f13fb9cf7c054f"
     },
     {
       "path": ".github/workflows/vsce-publish.yml",
@@ -122,12 +127,12 @@
     {
       "path": "package-lock.json",
       "bytes": 357193,
-      "sha256": "4da022949abbf6b62fc548882b772eec7891375b1e9e375323074e1525b20010"
+      "sha256": "18b70c73d1bd128e382b2142fb5b23c255a8f6df02d63dc1de68e22bec31abda"
     },
     {
       "path": "package.json",
       "bytes": 51234,
-      "sha256": "8cd9299e88ba38b2cf48cf0faceca3f009ee86e460f1ede21f123e9bf25fb34d"
+      "sha256": "598a83887da072432e9e0f850136959e9fa010048c559fcb927ef1220c88a01e"
     },
     {
       "path": "package.nls.json",
@@ -190,6 +195,11 @@
       "sha256": "f6416533acefa605cda654f6ac4169d5adabe52bc7db839a0a0e51c21cd8c85f"
     },
     {
+      "path": "scripts/hosted-audit-profile.cjs",
+      "bytes": 3874,
+      "sha256": "a7f9dbdf4f7a63828343bf8201c989ae4701173fdc522f0e0a326bf462e30e36"
+    },
+    {
       "path": "scripts/install-vendor.cjs",
       "bytes": 4900,
       "sha256": "3f6b4edacb015efd70b9d564a5bb3f323e0fd13925201c9b6a0f9830e3008c38"
@@ -250,6 +260,11 @@
       "sha256": "3f83193cbcaa6d8913eb0140679fc97480e72f9ce4c5c1fe26f98218f231994a"
     },
     {
+      "path": "scripts/run-hosted-live-audit.cjs",
+      "bytes": 4826,
+      "sha256": "984aa6dbc2cfcb936b3512e3dda0e92e3dc09991d8b8fdab6cb6bfe47775c3b8"
+    },
+    {
       "path": "scripts/run-live-sync.cjs",
       "bytes": 1997,
       "sha256": "963eea9bfed758f6d48b264b2b6dd206823e80e989797ba1caf90546a14949d2"
@@ -270,6 +285,11 @@
       "sha256": "daa63020a9bcbbf5c23fc5417223efefa044858a7b5f5e5dc8572ed31615bcf7"
     },
     {
+      "path": "scripts/run-self-hosted-acceptance.cjs",
+      "bytes": 12665,
+      "sha256": "82e9ab389c9d046d99904019c544188ead4ee4dd8ef5886c657b9004ab369d77"
+    },
+    {
       "path": "scripts/run-webview-compat.cjs",
       "bytes": 3887,
       "sha256": "d1f21befbd7df8f8e223de70f1fe60ed07174ba8ee4e9fd39ee1e5c18a8692c2"
@@ -280,14 +300,19 @@
       "sha256": "c99f4097d225c05315c254e23b6c874a01a5e6bc5ee8da029b5971edc4f3260d"
     },
     {
+      "path": "scripts/self-hosted-phase-report.cjs",
+      "bytes": 3120,
+      "sha256": "7c6da82be634e93ce0cf5ed5d86cb64baf22ca4b4dfd3a7afa9d58f85c2fcb4d"
+    },
+    {
       "path": "scripts/validate-release.cjs",
-      "bytes": 3614,
-      "sha256": "956b0fab35c717bd4e3a970b3f0de78145cc4df25bc1395ee24da832f063b0dc"
+      "bytes": 3770,
+      "sha256": "335f940e8fd69366299a92ad5278030a8ea743644f70ef42bf88a64495220e4f"
     },
     {
       "path": "scripts/vendor-patches/pdfjs-3.10.111-dist.patch",
-      "bytes": 7500,
-      "sha256": "cb7ac758ed9e8d9e3bbef8439c24b4bc363ba2eee9ffd5116c45ca985acf975a"
+      "bytes": 9687,
+      "sha256": "708a30345977217c918e5caa113aece7211505ba2332ccbfd6a3cfbd85454276"
     },
     {
       "path": "scripts/vscode-comment-glyph-patch.cjs",
@@ -356,8 +381,8 @@
     },
     {
       "path": "src/api/socketioAlt.ts",
-      "bytes": 27025,
-      "sha256": "2a82f9174e50bcebe5cddff5ea15bc62550d36096d779ddcd3d1257da6dba666"
+      "bytes": 27160,
+      "sha256": "5af077299175f71f2f3c48f4a6b2da13b6375bd20e7faede167d164ac1477d0c"
     },
     {
       "path": "src/api/socketioHelpers.ts",
@@ -656,8 +681,8 @@
     },
     {
       "path": "src/core/pdfViewEditorProvider.ts",
-      "bytes": 19324,
-      "sha256": "511ac5333b63ef4cf9f53331ca5d58c9e6d97ce8adf70ad7e8d849b93b8a40c4"
+      "bytes": 19441,
+      "sha256": "905ac8e4bfaf95c5c5d0752f4b4f802f7a6377021abefa2d168730235305e665"
     },
     {
       "path": "src/core/projectManagerProvider.ts",
@@ -771,8 +796,8 @@
     },
     {
       "path": "src/offline/projectOfflineStore.ts",
-      "bytes": 10497,
-      "sha256": "7ef43976a76cafb2335f5264e547bbe9df9ae3d83f9bacc621feedcbdda14ed8"
+      "bytes": 11373,
+      "sha256": "418b35f08a168356e4e757121271f9771ad433acb77cf59b49217e79e10039cb"
     },
     {
       "path": "src/scm/historyFilters.ts",
@@ -1190,6 +1215,16 @@
       "sha256": "57826a3a92e440ac7c1c10a12c4649703dc22d7fd500ba89beb1888b2973a60b"
     },
     {
+      "path": "test/hostedAuditProfile.test.cjs",
+      "bytes": 3099,
+      "sha256": "fc8c5ef95ece801054b0bdbdb899cd0712dd880ac1c8c2a488ec13d82271cfa7"
+    },
+    {
+      "path": "test/hostedPhaseReport.test.cjs",
+      "bytes": 3532,
+      "sha256": "34a8a104041567a734570eea193cbd1da0961cfd0c5331c0d24074b88a0a94b2"
+    },
+    {
       "path": "test/httpTransport.test.cjs",
       "bytes": 1055,
       "sha256": "4da8294c8c916a2e280e885199d42f8fabcddbcaba8ac3ee7763309175b7ec14"
@@ -1240,6 +1275,21 @@
       "sha256": "d556042e2447a0eea0b78844ffaf52294df7b2d292cf4b56bc1edb3ccc2ac8bf"
     },
     {
+      "path": "test/integration/hosted-driver/index.cjs",
+      "bytes": 6033,
+      "sha256": "35c136cec9ef9f4c908411f1920ffa06a1d9a42f995bbfc6002a1728faf1beb3"
+    },
+    {
+      "path": "test/integration/hosted-driver/package.json",
+      "bytes": 404,
+      "sha256": "706e1a2a0bec77f9b928365e49a2e5a1cea038f4c8a33f33b9bd599a044e529f"
+    },
+    {
+      "path": "test/integration/hosted-driver/phase-report.cjs",
+      "bytes": 2645,
+      "sha256": "c2c0de4562ea07f344a162e9dffe61d37f6e7a098dafe12c76d74cd6008b5071"
+    },
+    {
       "path": "test/integration/live-driver/index.cjs",
       "bytes": 888,
       "sha256": "6de734f70edf1b6abaeb0673ac651db6e9c8d214612610deb560a2cb7cfbc23c"
@@ -1251,8 +1301,8 @@
     },
     {
       "path": "test/integration/liveSync.cjs",
-      "bytes": 14633,
-      "sha256": "aabe3aa0dd1a3859a8f1d35acda46babe12a982cb3be16a52ce2b369675d30ab"
+      "bytes": 14816,
+      "sha256": "be51ac9b5ed7cc07628b806f85352365cc3fd45c3f6b0355d19e6b1223fb1323"
     },
     {
       "path": "test/integration/reconnect-driver/index.cjs",
@@ -1286,18 +1336,38 @@
     },
     {
       "path": "test/integration/release-driver/smoke.cjs",
-      "bytes": 12320,
-      "sha256": "fe9d70d18aca2c9f5cf704b6c85c3b4bba3cd99406d5d51720c04e5f2cff5f4a"
+      "bytes": 15207,
+      "sha256": "86781a815a3c6c5a8e6f2dbe510f9931aa58e3345b220bcf256416d26c7a1bed"
+    },
+    {
+      "path": "test/integration/self-hosted-driver/index.cjs",
+      "bytes": 613,
+      "sha256": "ce7debad343634d827a090d54a30a14308c1d4e0ceddf8c6d423aa480708e221"
+    },
+    {
+      "path": "test/integration/self-hosted-driver/package.json",
+      "bytes": 288,
+      "sha256": "b1542b00e06fee045c7b78971f0444292a2266a8b2c312dc33336ab191853ac2"
+    },
+    {
+      "path": "test/integration/selfHostedAcceptance.cjs",
+      "bytes": 6549,
+      "sha256": "045c8ad7a5c2237a80933ff084ffb948ec2c677c9802fbf31de40fe87f90beca"
+    },
+    {
+      "path": "test/integration/selfHostedAcceptanceExtras.cjs",
+      "bytes": 4066,
+      "sha256": "6777db8f2f3214fb8fc23d647f6958ba703de6ddce9869f055c6f736aee42505"
     },
     {
       "path": "test/integration/webviewProbe.js",
-      "bytes": 6320,
-      "sha256": "37cd0e30d221fa09705b002031963bcddf3ba353b5fe96180e74cfec93c89660"
+      "bytes": 9031,
+      "sha256": "4bb2bbdcfb86f831a869e12555ed35fac5ffd83e6f6d8f3e6b95ce7d7bc1e9fa"
     },
     {
       "path": "test/integration/webviewSoak.cjs",
-      "bytes": 11357,
-      "sha256": "737a9f07a1740d810e3b5f4d17dc9637e81dec3dd80179a039d604c2cd5aed2e"
+      "bytes": 11810,
+      "sha256": "ccdd1cc11f753b23ce497aafea925882778b49ebbb9272ad92aa529814b81ef2"
     },
     {
       "path": "test/intellisenseLifecycle.test.cjs",
@@ -1431,8 +1501,13 @@
     },
     {
       "path": "test/pdfPrintCleanup.test.cjs",
-      "bytes": 2941,
-      "sha256": "9b2c125b93a371eaa0668c3b1c9c71cbe146fa9064080a3b99617251e0a2c996"
+      "bytes": 4981,
+      "sha256": "76a203a9dc6ea078700ea69d09541ca1fe0b597f8cf5d58e42302ba5057e2b05"
+    },
+    {
+      "path": "test/pdfPrintEncoder.test.cjs",
+      "bytes": 6221,
+      "sha256": "69fff83f78f0b41bd5e4bcb8be737b9c6c500e5b8c1a93a598372e4cd3a3de7f"
     },
     {
       "path": "test/pdfReliability.test.cjs",
@@ -1501,8 +1576,8 @@
     },
     {
       "path": "test/recoveryPersistence.test.cjs",
-      "bytes": 12039,
-      "sha256": "30ce59c91e6e4bcc5ce7e690ddb0e5035df91f856d71787f9a7ee3c4e4f3dad0"
+      "bytes": 14797,
+      "sha256": "0b0810ef665bf4258bbd821366654c1f3f635067881f7e5e4918f59c77ecf21e"
     },
     {
       "path": "test/recoveryPolicy.test.cjs",
@@ -1560,14 +1635,19 @@
       "sha256": "7c5fa7f83fe97049779d9f63a65984b69b1cd8533930ceb182ae243b68a88983"
     },
     {
+      "path": "test/selfHostedAcceptanceLifecycle.test.cjs",
+      "bytes": 5475,
+      "sha256": "79f48ffbb696c659fdf91f1924cc72dc5db943b76040428429bf0e559e3bccf6"
+    },
+    {
       "path": "test/socketAcknowledgement.test.cjs",
       "bytes": 2544,
       "sha256": "0351a30437bf08f3d87f873e3fc625c9c5d6719e95dc21ff6755e0ac5125e739"
     },
     {
       "path": "test/socketAlternativeRecovery.test.cjs",
-      "bytes": 10760,
-      "sha256": "dbaebc8656213e8273fbdf098bee8cb7d4ae8c0fa824d7bd5e0379720dba203f"
+      "bytes": 14721,
+      "sha256": "6af41f4181871299545ca21dc7b0fec63e783f4bd7566860edd18b754a34d7ad"
     },
     {
       "path": "test/socketLifecycle.test.cjs",
@@ -1788,6 +1868,16 @@
       "path": "views/pdf-viewer/index.js",
       "bytes": 16582,
       "sha256": "e6ac6e54ff14cc897284f37645e3864b394ed4d7843c1d6cb2b7174a7c0f23e6"
+    },
+    {
+      "path": "views/pdf-viewer/printEncoder.js",
+      "bytes": 4247,
+      "sha256": "5ce38a618582de37305ef7dbc8cf7d6d890a191cb43ce41f3f22d59ccb0e0dc3"
+    },
+    {
+      "path": "views/pdf-viewer/printEncoderWorker.js",
+      "bytes": 598,
+      "sha256": "dbf29ee839fc2cab3afe26118676d69d69e7e6050a265e1491222c20af4b8e20"
     },
     {
       "path": "views/pdf-viewer/syncHighlight.js",
