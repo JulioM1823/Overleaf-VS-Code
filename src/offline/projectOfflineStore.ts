@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import * as path from 'path';
 import { AsyncQueue } from '../utils/asyncQueue';
 import { LatestTaskQueue } from '../utils/latestTaskQueue';
 import { StorageOwnership } from '../utils/storageOwnership';
@@ -110,6 +111,21 @@ export class ProjectOfflineStore {
         private readonly serverName: string,
     ) {}
 
+    private nativeGlobalStorageUri(): vscode.Uri {
+        const uri = this.context.globalStorageUri;
+        if (uri.scheme==='file') { return uri; }
+        // Native VS Code profiles can expose local user data through this
+        // scheme alias. Its native provider preserves the path while mapping
+        // to file:. Resolve only the local desktop alias, never arbitrary or
+        // remote virtual filesystems, so ownership and writes share one path.
+        if (uri.scheme==='vscode-userdata' && vscode.env?.appHost==='desktop'
+            && !vscode.env.remoteName && !uri.authority && !uri.query && !uri.fragment
+            && path.isAbsolute(uri.fsPath)) {
+            return vscode.Uri.file(uri.fsPath);
+        }
+        throw new Error('Project recovery requires a filesystem that supports exclusive writer ownership.');
+    }
+
     private async resolveStorage(): Promise<ResolvedProjectOfflineStorage> {
         if (this.closed) { throw new Error('The project recovery store has been closed'); }
         const workspace = await resolveLocalReplicaWorkspaceForOverleafUri(this.overleafUri);
@@ -118,7 +134,7 @@ export class ProjectOfflineStore {
         const accountKey = createHash('sha256').update(JSON.stringify([this.serverName, this.projectId, userId])).digest('hex');
         const storageRoot = workspace
             ? vscode.Uri.joinPath(workspace.workspaceRoot, OFFLINE_STORAGE_DIRECTORY_NAME)
-            : vscode.Uri.joinPath(this.context.globalStorageUri, 'offline-accounts', accountKey);
+            : vscode.Uri.joinPath(this.nativeGlobalStorageUri(), 'offline-accounts', accountKey);
         if (!workspace) {
             this.legacyStorageCheck ??= this.checkLegacyRecoveryState();
             await this.legacyStorageCheck;
@@ -151,7 +167,7 @@ export class ProjectOfflineStore {
     }
 
     private async checkLegacyRecoveryState() {
-        const root = vscode.Uri.joinPath(this.context.globalStorageUri, 'offline-projects',
+        const root = vscode.Uri.joinPath(this.nativeGlobalStorageUri(), 'offline-projects',
             sanitizeLocalReplicaProjectFolderName(this.serverName), sanitizeLocalReplicaProjectFolderName(this.projectId || this.projectName));
         for (const filename of ['offline-operations.json', 'document-sync-state.json', 'offline-project-state.json']) {
             try {

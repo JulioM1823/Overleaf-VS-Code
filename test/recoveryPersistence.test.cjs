@@ -5,14 +5,15 @@ const path = require('node:path');
 const os = require('node:os');
 const Module = require('node:module');
 const originalLoad = Module._load;
+const environment = {appHost:'desktop',remoteName:undefined};
 class Uri {
-    constructor(value) { this.scheme = 'file'; this.fsPath = value; this.path = value; }
-    toString() { return `file://${this.path}`; }
+    constructor(value, scheme='file', authority='', query='', fragment='') { Object.assign(this,{scheme,authority,query,fragment,fsPath:value,path:value}); }
+    toString() { return `${this.scheme}://${this.authority}${this.path}`; }
     static file(value) { return new Uri(value); }
-    static joinPath(root, ...parts) { return new Uri(path.join(root.fsPath, ...parts)); }
+    static joinPath(root, ...parts) { return new Uri(path.join(root.fsPath, ...parts),root.scheme,root.authority,root.query,root.fragment); }
 }
 Module._load = function(request, parent, main) {
-    if (request === 'vscode') return {Uri, workspace: {getConfiguration: () => ({get: (_key, fallback) => fallback}), fs: {
+    if (request === 'vscode') return {Uri, env:environment, workspace: {getConfiguration: () => ({get: (_key, fallback) => fallback}), fs: {
         readFile: uri => fs.readFile(uri.fsPath), writeFile: (uri, bytes) => fs.writeFile(uri.fsPath, bytes),
         createDirectory: uri => fs.mkdir(uri.fsPath, {recursive: true}),
     }}};
@@ -200,4 +201,44 @@ test('closing drains already admitted queue writes and rejects new writes before
     const next = make();
     assert.equal((await next.loadOperationQueue()).operations[0].id, 'accepted-before-close');
     await next.close();
+});
+
+
+test('native vscode-userdata storage uses the same physical files and writer guard as its file alias',async t=>{
+    const {root}=await fixture(t);
+    const {ProjectOfflineStore}=require('../out/offline/projectOfflineStore');
+    const make=storage=>new ProjectOfflineStore({globalStorageUri:storage},
+        {query:'user=owner&project=p',scheme:'overleaf-workshop'},'p','Project','server');
+    const aliased=make(new Uri(root,'vscode-userdata'));const native=make(Uri.file(root));
+    t.after(()=>Promise.all([aliased.close(),native.close()]));
+    const queued={version:1,lastUpdatedAt:new Date().toISOString(),operations:[{
+        id:'unsent-native-alias',createdAt:new Date().toISOString(),kind:'chat.send',
+        payload:{content:'retained',localMessageId:'local'},
+    }]};
+    await aliased.saveOperationQueue(queued);
+    const location=await aliased.describeStorage();
+    assert.equal(location.storageRoot.scheme,'file');
+    assert.equal(location.storageRoot.fsPath,path.dirname(location.operationLogUri.fsPath));
+    assert.deepEqual(JSON.parse(await fs.readFile(location.operationLogUri.fsPath,'utf8')).operations,queued.operations);
+    await assert.rejects(native.loadOperationQueue(),/another VS Code window/);
+    await aliased.close();
+    assert.deepEqual((await native.loadOperationQueue()).operations,queued.operations);
+});
+
+test('unknown, remote, web, relative and authority-bearing user-data storage remains fail closed',async t=>{
+    const {root}=await fixture(t);const {ProjectOfflineStore}=require('../out/offline/projectOfflineStore');
+    t.after(()=>{environment.appHost='desktop';environment.remoteName=undefined;});
+    const check=async(uri)=>{
+        const store=new ProjectOfflineStore({globalStorageUri:uri},{query:'user=owner&project=p',scheme:'overleaf-workshop'},'p','Project','server');
+        await assert.rejects(store.describeStorage(),/filesystem that supports exclusive writer ownership/);
+        await store.close();
+    };
+    await check(new Uri(root,'memfs'));
+    await check(new Uri(root,'vscode-userdata','remote-authority'));
+    await check(new Uri('relative','vscode-userdata'));
+    await check(new Uri(root,'vscode-userdata','','unexpected=query'));
+    await check(new Uri(root,'vscode-userdata','','','fragment'));
+    environment.appHost='web';await check(new Uri(root,'vscode-userdata'));
+    environment.appHost='desktop';environment.remoteName='ssh-remote';await check(new Uri(root,'vscode-userdata'));
+    assert.deepEqual(await fs.readdir(root),[]);
 });

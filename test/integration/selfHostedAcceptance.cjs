@@ -6,6 +6,7 @@ const vscode = require('vscode');
 const root = path.resolve(__dirname, '../..');
 const {GlobalStateManager} = require(path.join(root, 'out/utils/globalStateManager'));
 const {BaseAPI} = require(path.join(root, 'out/api/base'));
+const {completePhase, failPhase} = require('../../scripts/self-hosted-phase-report.cjs');
 
 exports.run = async () => {
     const accounts = JSON.parse(fs.readFileSync(process.env.OVERLEAF_CE_ACCOUNT_FILE, 'utf8'));
@@ -66,18 +67,16 @@ exports.run = async () => {
         process.env.OVERLEAF_TEST_PHASE = phase;
         stage = 'live-production-vfs-scenarios';
         await require('./liveSync.cjs').run();
-        const result = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
-        result.genuineSelfHostedServer = true;
-        result.passwordLogin = 'passed through production BaseAPI and GlobalStateManager';
-        result.secretStorageOnly = true;
-        result.normalExtensionHost = true;
-        result.reauthenticatedAfterRestart = false;
-        result.serverRestartBeforePhase = phase === 'restart';
-        fs.writeFileSync(reportPath, JSON.stringify(result, null, 2) + '\n', {mode: 0o600});
+        completePhase(reportPath, phase, process.env.OVERLEAF_CE_PHASE_RUN_ID, {
+            genuineSelfHostedServer: true, passwordLogin: 'passed through production BaseAPI and GlobalStateManager',
+            secretStorageOnly: true, normalExtensionHost: true, reauthenticatedAfterRestart: false,
+            serverRestartBeforePhase: phase === 'restart'});
     } catch (error) {
-        const previous = fs.existsSync(reportPath) ? JSON.parse(fs.readFileSync(reportPath, 'utf8')) : {};
-        fs.writeFileSync(reportPath, JSON.stringify({...previous, status: 'failed', phase, stage,
-            reason: error instanceof assert.AssertionError ? error.message : 'Acceptance operation failed; sensitive server response omitted.'}, null, 2), {mode: 0o600});
+        failPhase(reportPath, phase, process.env.OVERLEAF_CE_PHASE_RUN_ID,
+            error instanceof assert.AssertionError ? error.message : 'Acceptance operation failed; sensitive server response omitted.');
+        const failed = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+        failed.stage = stage;
+        fs.writeFileSync(reportPath, JSON.stringify(failed, null, 2) + '\n', {mode: 0o600});
         throw new Error(`Self-hosted acceptance failed at ${stage}`);
     } finally {
         GlobalStateManager.getServers = getServers;

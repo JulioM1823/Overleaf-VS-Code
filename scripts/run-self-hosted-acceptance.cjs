@@ -5,8 +5,9 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const {spawn} = require('node:child_process');
 const {downloadAndUnzipVSCode} = require('@vscode/test-electron');
+const {beginPhase, verifyPhase} = require('./self-hosted-phase-report.cjs');
 
-function command(executable, args, {input, env = process.env, timeout = 600000, inherit = false} = {}) {
+function command(executable, args, {input, env = process.env, timeout = 600000, inherit = false, mergeOutput = false} = {}) {
     return new Promise((resolve, reject) => {
         const child = spawn(executable, args, {env, stdio: ['pipe', inherit ? 'inherit' : 'pipe', 'pipe']});
         const output = [], errors = [];
@@ -16,7 +17,7 @@ function command(executable, args, {input, env = process.env, timeout = 600000, 
         child.once('error', error => {clearTimeout(timer); reject(error);});
         child.once('close', code => {
             clearTimeout(timer);
-            if (code === 0) resolve(Buffer.concat(output).toString());
+            if (code === 0) resolve(Buffer.concat(mergeOutput ? output.concat(errors) : output).toString());
             // Never echo captured server/account-bootstrap output: it can contain session data.
             else reject(new Error(`Acceptance subprocess failed: ${path.basename(executable)} exit ${code}`));
         });
@@ -38,6 +39,7 @@ async function main() {
     const report = {status: 'running', genuineServer: true, serverVersion: '6.3.4', vscodeRequest: version,
         credentials: 'Synthetic accounts only; random passwords remain in task-private files/stdin and isolated SecretStorage.',
         publishedServerPorts: '127.0.0.1:18082 only', phases: [], limitations: ['Community Edition is not hosted Overleaf SSO/captcha acceptance.']};
+    let accountBootstrapStarted = false;
     const save = () => fs.writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n', {mode: 0o600});
     const accounts = [{email: 'owner@acceptance.invalid', password: crypto.randomBytes(32).toString('base64url')},
         {email: 'outsider@acceptance.invalid', password: crypto.randomBytes(32).toString('base64url')}];
@@ -62,7 +64,39 @@ async function main() {
         }
         throw new Error(`Acceptance timed out waiting for ${label}`);
     };
-    const serverReady = () => waitFor(async () => (await fetch(new URL('login', url), {signal: AbortSignal.timeout(10000)})).status === 200, 'CE login page');
+    const serverReady = () => waitFor(async () => {
+        try {
+            const response = await fetch(new URL('login', url), {signal: AbortSignal.timeout(10000)});
+            report.lastPreAccountHttp = {status: response.status, path: new URL(response.url).pathname};
+            return response.status === 200;
+        } catch (error) {
+            report.lastPreAccountHttp = {connectionErrorCode: error.cause?.code || error.code || error.name};
+            return false;
+        }
+    }, 'CE login page');
+    const preAccountDiagnostics = async () => {
+        // No complete logs are retained once credentials or sessions can exist.
+        if (accountBootstrapStarted) return;
+        const diagnostics = {scope: 'Pre-account provisioning only', services: {}};
+        for (const service of ['mongo', 'redis', 'server']) {
+            try {
+                const id = (await docker(['ps', '-aq', service])).trim();
+                if (!id) { diagnostics.services[service] = {status: 'absent'}; continue; }
+                const state = JSON.parse(await command('docker', ['inspect', '--format', '{{json .State}}', id]));
+                diagnostics.services[service] = {status: state.Status, exitCode: state.ExitCode,
+                    oomKilled: state.OOMKilled, health: state.Health?.Status || 'not-configured'};
+            } catch { diagnostics.services[service] = {status: 'diagnostic-unavailable'}; }
+        }
+        try {
+            const raw = await docker(['logs', '--no-color', '--tail', '100', 'server'], {mergeOutput: true});
+            diagnostics.serverBootLog = raw.split(/\r?\n/)
+                .filter(line => !/secret|password|token|cookie|authorization|key|credential|crypto|session|(?:process\.)?env(?:ironment)?\b/i.test(line)
+                    && !/\b[A-Z][A-Z0-9_]*\s*[=:]/.test(line))
+                .map(line => line.replace(/[A-Za-z0-9_+/=-]{80,}/g, '[redacted opaque value]'))
+                .join('\n').slice(-1800);
+        } catch { diagnostics.serverBootLog = 'Unavailable'; }
+        report.preAccountDiagnostics = diagnostics;
+    };
     save();
     try {
         console.log('Acceptance: pulling official CE 6.3.4, MongoDB 8.0 and Redis 7.4 images.');
@@ -79,6 +113,7 @@ async function main() {
         await docker(['up', '-d', 'server']);
         await serverReady();
         const bootstrap = `import fs from 'node:fs';\nimport Registration from './app/src/Features/User/UserRegistrationHandler.mjs';\nconst accounts=JSON.parse(fs.readFileSync(0,'utf8'));\nfor(const account of accounts){await Registration.promises.registerNewUser(account);}\nprocess.exit(0);`;
+        accountBootstrapStarted = true;
         await docker(['exec', '-T', '-w', '/overleaf/services/web', 'server', 'node', '--input-type=module', '-e', bootstrap], {input: JSON.stringify(accounts)});
         console.log('Acceptance: two synthetic server accounts created; starting isolated native editor.');
         const executable = await downloadAndUnzipVSCode({version,
@@ -90,13 +125,14 @@ async function main() {
         delete env.ELECTRON_RUN_AS_NODE; delete env.VSCODE_IPC_HOOK_CLI;
         const launch = async phase => {
             console.log(`Acceptance: ${phase} native extension-host phase.`);
+            const phaseRunId = crypto.randomUUID();
+            beginPhase(env.OVERLEAF_LIVE_REPORT, phase, phaseRunId);
             await command(executable, ['--user-data-dir', path.join(profile, 'user'), '--extensions-dir', path.join(profile, 'extensions'),
                 '--extensionDevelopmentPath=' + root,
                 '--extensionDevelopmentPath=' + path.join(root, 'test/integration/self-hosted-driver'),
                 '--disable-extensions', '--disable-updates', '--skip-welcome', '--skip-release-notes', '--disable-telemetry', '--new-window'],
-            {env: {...env, OVERLEAF_CE_PHASE: phase}, timeout: 720000, inherit: true});
-            const live = JSON.parse(fs.readFileSync(env.OVERLEAF_LIVE_REPORT, 'utf8'));
-            if (live.status !== 'passed') throw new Error(`Native acceptance ${phase} did not pass`);
+            {env: {...env, OVERLEAF_CE_PHASE: phase, OVERLEAF_CE_PHASE_RUN_ID: phaseRunId}, timeout: 720000, inherit: true});
+            const live = verifyPhase(env.OVERLEAF_LIVE_REPORT, phase, phaseRunId);
             report.phases.push({phase, ...live}); save();
         };
         await launch('initial');
@@ -107,7 +143,9 @@ async function main() {
         report.status = 'passed'; save();
         console.log(`Genuine self-hosted acceptance passed: ${reportPath}`);
     } catch (error) {
-        report.status = 'failed'; report.failure = error.message; save(); throw error;
+        report.status = 'failed'; report.failure = error.message;
+        await preAccountDiagnostics();
+        save(); throw error;
     } finally {
         await docker(['down', '--volumes', '--remove-orphans']).catch(() => { report.cleanupFailure = true; save(); });
         fs.rmSync(directory, {recursive: true, force: true});
