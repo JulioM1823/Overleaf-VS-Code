@@ -117,7 +117,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
     if (request==='vscode') {
         return vscodeMock;
     }
-    if (request==='../core/remoteFileSystemProvider' && parent?.id?.endsWith('/compileManager.js')) {
+    if (request==='../core/remoteFileSystemProvider' && parent?.id?.replace(/\\/g, '/').endsWith('/compileManager.js')) {
         return {
             RemoteFileSystemProvider: class {},
             VirtualFileSystem: class {},
@@ -128,19 +128,19 @@ Module._load = function patchedLoad(request, parent, isMain) {
             }),
         };
     }
-    if (request==='../core/pdfViewEditorProvider' && parent?.id?.endsWith('/compileManager.js')) {
+    if (request==='../core/pdfViewEditorProvider' && parent?.id?.replace(/\\/g, '/').endsWith('/compileManager.js')) {
         return {
             PdfDocument: class {},
         };
     }
-    if (request==='../utils/eventBus' && parent?.id?.endsWith('/compileManager.js')) {
+    if (request==='../utils/eventBus' && parent?.id?.replace(/\\/g, '/').endsWith('/compileManager.js')) {
         return {
             EventBus: {
                 on: (event, callback) => { eventHandlers.set(event, callback); return {dispose: noop}; },
             },
         };
     }
-    if (request==='../utils/diagnostics' && parent?.id?.includes('/compileManager.js')) {
+    if (request==='../utils/diagnostics' && parent?.id?.replace(/\\/g, '/').includes('/compileManager.js')) {
         return {
             logDiagnostic: (_scope, event, fields, error) => diagnosticRecords.push({event, fields, error}),
             registerDiagnosticStateProvider: () => ({dispose: noop}),
@@ -150,14 +150,14 @@ Module._load = function patchedLoad(request, parent, isMain) {
             }),
         };
     }
-    if (request==='../scm/localReplicaSCM' && parent?.id?.endsWith('/compileManager.js')) {
+    if (request==='../scm/localReplicaSCM' && parent?.id?.replace(/\\/g, '/').endsWith('/compileManager.js')) {
         return {
             LocalReplicaSCMProvider: {
                 readSettings: async () => localReplicaSettings,
             },
         };
     }
-    if (request==='../core/projectWorkspaceBinding' && parent?.id?.endsWith('/compileManager.js')) {
+    if (request==='../core/projectWorkspaceBinding' && parent?.id?.replace(/\\/g, '/').endsWith('/compileManager.js')) {
         const binding = target => target?.scheme==='file' && localReplicaSettings?.uri ? {
             mode: 'localReplica',
             workspaceRootUri: {toString: () => 'file:///tmp/project'},
@@ -170,7 +170,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
             resolveActiveProjectWorkspaceBinding: async () => binding(vscodeMock.window.activeTextEditor?.document.uri),
         };
     }
-    if (request==='./compileLogParser' && parent?.id?.endsWith('/compileManager.js')) {
+    if (request==='./compileLogParser' && parent?.id?.replace(/\\/g, '/').endsWith('/compileManager.js')) {
         return {
             ErrorSchema: class {},
             LatexParser: class {
@@ -180,7 +180,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
             },
         };
     }
-    if (request==='./compileArtifacts' && parent?.id?.endsWith('/compileManager.js')) {
+    if (request==='./compileArtifacts' && parent?.id?.replace(/\\/g, '/').endsWith('/compileManager.js')) {
         return {
             isCompileLogArtifact: (value) => {
                 const path = String(value?.path || value?.name || '').replace(/^\.?\//, '').toLowerCase();
@@ -190,7 +190,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
             normalizeSyncResultFilePath: (value) => value,
         };
     }
-    if (request==='../core/pdfReliability' && parent?.id?.endsWith('/compileManager.js')) {
+    if (request==='../core/pdfReliability' && parent?.id?.replace(/\\/g, '/').endsWith('/compileManager.js')) {
         return {
             isLikelyPdfPayload: () => true,
         };

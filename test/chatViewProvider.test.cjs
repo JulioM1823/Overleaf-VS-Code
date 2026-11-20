@@ -57,13 +57,13 @@ Module._load = function patchedLoad(request, parent, isMain) {
             },
         };
     }
-    if (request==='../utils/diagnostics' && parent?.id?.endsWith('/chatViewProvider.js')) {
+    if (request==='../utils/diagnostics' && parent?.id?.replace(/\\/g, '/').endsWith('/chatViewProvider.js')) {
         return {
             logDiagnostic: noop,
             registerDiagnosticStateProvider: () => ({dispose: noop}),
         };
     }
-    if (request==='../utils/eventBus' && parent?.id?.endsWith('/chatViewProvider.js')) {
+    if (request==='../utils/eventBus' && parent?.id?.replace(/\\/g, '/').endsWith('/chatViewProvider.js')) {
         return {
             EventBus: {
                 fire: noop,
@@ -78,7 +78,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
             },
         };
     }
-    if (request==='./chatMessageFormatting' && parent?.id?.endsWith('/chatViewProvider.js')) {
+    if (request==='./chatMessageFormatting' && parent?.id?.replace(/\\/g, '/').endsWith('/chatViewProvider.js')) {
         return {
             normalizeChatMessage: (message) => message,
         };

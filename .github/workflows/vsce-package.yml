@@ -20,13 +20,28 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Verify the original audited distribution
+      - name: Verify the final audited distribution
         id: verify_distribution
         run: >-
-          node -e "const fs = require('node:fs'); const assert = require('node:assert/strict'); const {createHash} = require('node:crypto'); assert.equal(createHash('sha256').update(fs.readFileSync('audit-distribution.vsix')).digest('hex'), 'bf3c1120a600dccaf6bc0ce9a4566ae2ed5b70064db512b487d7b3a2b9ac19ad');"
+          node -e "const fs = require('node:fs'); const assert = require('node:assert/strict'); const {createHash} = require('node:crypto'); assert.equal(createHash('sha256').update(fs.readFileSync('audit-distribution.vsix')).digest('hex'), 'c85e4852b961821061d7c4c6f1b84e23181092000e2ce2bd36df990ab086b2b0');"
       - run: npm ci && npm ci --prefix views/chat-view
       - run: npm test
       - run: npx --yes @vscode/vsce@4.1.0 package --out orbitleaf.vsix
+      - name: Diagnose clean Windows editor startup with default graphics
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        env:
+          RELEASE_SMOKE_CLEAN_EDITOR_ONLY: '1'
+          RELEASE_SMOKE_DISABLE_GPU: '0'
+          RELEASE_SMOKE_REPORT: output/release-audit/clean-editor-default-graphics-${{ runner.os }}-${{ matrix.vscode }}.json
+        run: node scripts/run-release-compat.cjs orbitleaf.vsix ${{ matrix.vscode }}
+      - name: Measure installed Windows package with default graphics
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        env:
+          RELEASE_SMOKE_DISABLE_GPU: '0'
+          RELEASE_SMOKE_REPORT: output/release-audit/installed-default-graphics-${{ runner.os }}-${{ matrix.vscode }}.json
+        run: node scripts/run-release-compat.cjs audit-distribution.vsix ${{ matrix.vscode }}
       - name: Test installed package (Linux)
         if: runner.os == 'Linux'
         env:
@@ -35,18 +50,28 @@ jobs:
       - name: Test installed package (macOS / Windows)
         if: runner.os != 'Linux'
         env:
+          RELEASE_SMOKE_DISABLE_GPU: ${{ runner.os == 'Windows' && '1' || '0' }}
           RELEASE_SMOKE_REPORT: output/release-audit/rebuilt-${{ runner.os }}-${{ matrix.vscode }}.json
         run: node scripts/run-release-compat.cjs orbitleaf.vsix ${{ matrix.vscode }}
-      - name: Test original audited distribution (Linux)
+      - name: Test final audited distribution (Linux)
         if: ${{ !cancelled() && steps.verify_distribution.outcome == 'success' && runner.os == 'Linux' }}
         env:
           RELEASE_SMOKE_REPORT: output/release-audit/distribution-${{ runner.os }}-${{ matrix.vscode }}.json
         run: xvfb-run -a node scripts/run-release-compat.cjs audit-distribution.vsix ${{ matrix.vscode }}
-      - name: Test original audited distribution (macOS / Windows)
+      - name: Test final audited distribution (macOS / Windows)
         if: ${{ !cancelled() && steps.verify_distribution.outcome == 'success' && runner.os != 'Linux' }}
         env:
+          RELEASE_SMOKE_DISABLE_GPU: ${{ runner.os == 'Windows' && '1' || '0' }}
           RELEASE_SMOKE_REPORT: output/release-audit/distribution-${{ runner.os }}-${{ matrix.vscode }}.json
         run: node scripts/run-release-compat.cjs audit-distribution.vsix ${{ matrix.vscode }}
+      - name: Test production chat and PDF webviews (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a node scripts/run-webview-compat.cjs ${{ matrix.vscode }}
+      - name: Test production chat and PDF webviews (macOS / Windows)
+        if: runner.os != 'Linux'
+        env:
+          OVERLEAF_TEST_DISABLE_GPU: ${{ runner.os == 'Windows' && '1' || '0' }}
+        run: node scripts/run-webview-compat.cjs ${{ matrix.vscode }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -2,7 +2,7 @@
   "extensionId": "AstroJulio.orbitleaf",
   "version": "0.16.7",
   "archive": "orbitleaf-0.16.7-source.zip",
-  "sha256": "da51a75d5e2df42754f2db6c3505683702c670e8fc18ecdfaf39a166ab01c3fe",
+  "sha256": "cd09efa1aade038fbf45a1b0815db554fec3dd26cde899dd577ae438b0909985",
   "files": [
     {
       "path": ".eslintrc.json",
@@ -36,8 +36,8 @@
     },
     {
       "path": ".github/workflows/vsce-package.yml",
-      "bytes": 1229,
-      "sha256": "b92d7e52511d81fa98d4d733682a86dcd3244f61900c18b7a73a7d221547bea5"
+      "bytes": 2218,
+      "sha256": "4923b5762892c80c2fa192826120e0bfcc025323c129f625f920af6fed9df032"
     },
     {
       "path": ".github/workflows/vsce-publish.yml",
@@ -121,13 +121,13 @@
     },
     {
       "path": "package-lock.json",
-      "bytes": 357170,
-      "sha256": "b02f89105aa922aee1efa0a118ea48b1b440c62187164189396613efb6a9ce0d"
+      "bytes": 357193,
+      "sha256": "4da022949abbf6b62fc548882b772eec7891375b1e9e375323074e1525b20010"
     },
     {
       "path": "package.json",
-      "bytes": 51235,
-      "sha256": "5b9dcc56e687ba407b14fdaf3626c903597cbfb7bb954a54c5699c9771503a12"
+      "bytes": 51234,
+      "sha256": "8cd9299e88ba38b2cf48cf0faceca3f009ee86e460f1ede21f123e9bf25fb34d"
     },
     {
       "path": "package.nls.json",
@@ -266,8 +266,13 @@
     },
     {
       "path": "scripts/run-release-smoke.cjs",
-      "bytes": 7568,
-      "sha256": "9ec23613542c9336a50aa5a9b0d15fc0c07b9ad6523253dc2e12bf13fcb4c72e"
+      "bytes": 10352,
+      "sha256": "daa63020a9bcbbf5c23fc5417223efefa044858a7b5f5e5dc8572ed31615bcf7"
+    },
+    {
+      "path": "scripts/run-webview-compat.cjs",
+      "bytes": 3887,
+      "sha256": "d1f21befbd7df8f8e223de70f1fe60ed07174ba8ee4e9fd39ee1e5c18a8692c2"
     },
     {
       "path": "scripts/run-webview-soak.cjs",
@@ -291,8 +296,8 @@
     },
     {
       "path": "scripts/vscode-test-launcher.cjs",
-      "bytes": 754,
-      "sha256": "9c2aa62281a1f5cacfe46aecaf7eaa4f9f21f05721cba30c7d6ef87e9b600298"
+      "bytes": 875,
+      "sha256": "12dffe0a93ef46c2f2a7d86bb7305cd0ca09da0ea78bde005df14a3d56706259"
     },
     {
       "path": "source/README.md",
@@ -976,8 +981,8 @@
     },
     {
       "path": "test/chatViewProvider.test.cjs",
-      "bytes": 5530,
-      "sha256": "9f9233eb2c2795b9d9f53336bd6a3519b3be39f3aa0515a9f7c7e764f4db76e1"
+      "bytes": 5590,
+      "sha256": "f732a20e4339f4841b5d9af79317da8adcfa36d64e052f0d940a05a249606184"
     },
     {
       "path": "test/citationMetadata.test.cjs",
@@ -1086,8 +1091,8 @@
     },
     {
       "path": "test/commentTimestamps.test.cjs",
-      "bytes": 917,
-      "sha256": "9c5c2df9e34a0a278920993c86a30e17e08c53c44f5a527d4f637acb095a77dc"
+      "bytes": 1797,
+      "sha256": "6d15ee2ad1657a3ab59468d6f5651d648393a6d7ca29aeaf05e97a3d62cedd56"
     },
     {
       "path": "test/compileArtifacts.test.cjs",
@@ -1111,8 +1116,8 @@
     },
     {
       "path": "test/compileManager.test.cjs",
-      "bytes": 31768,
-      "sha256": "04f572e21a6acd3bdfaa51c900566d0d4e5f5024c75abc134decc961cbbb1cea"
+      "bytes": 31948,
+      "sha256": "b4c46cb76a5d49723e4cde9545bd4a6456e57592c327210539e61c6688bd4c36"
     },
     {
       "path": "test/compileProjectTarget.test.cjs",
@@ -1260,6 +1265,11 @@
       "sha256": "016f8cb05bcdf266cc5dd29ad23613d2fbf33a9e7487fdc09d842a735700c168"
     },
     {
+      "path": "test/integration/release-driver/baseline.cjs",
+      "bytes": 1905,
+      "sha256": "772b179da2fd75528b04a3c6bc6b69fa9e6f16ed96d30ef0a076dbd10235ba0e"
+    },
+    {
       "path": "test/integration/release-driver/index.cjs",
       "bytes": 96,
       "sha256": "eaf4dc71a45e99c1fb1846b03a48a1ee8690cb0550c3eff426049c15de89aa9c"
@@ -1346,8 +1356,8 @@
     },
     {
       "path": "test/localReplicaResolution.test.cjs",
-      "bytes": 4017,
-      "sha256": "6d9c9d01ad68b83c2a9db84243adf014d14b85b7dc729c05ad5f592ec50107fb"
+      "bytes": 4115,
+      "sha256": "a5d9336cf2f401c412cdc4ca1c5e1bd5029b35fde99f43c5e25dcf7ee1526579"
     },
     {
       "path": "test/localReplicaSyncState.test.cjs",
@@ -1366,8 +1376,8 @@
     },
     {
       "path": "test/localReplicaWorkspace.test.cjs",
-      "bytes": 5539,
-      "sha256": "72f7d5fb37a55d3220b540609b9d7d84b9f225b941280e7d4842846df0acaa0d"
+      "bytes": 5609,
+      "sha256": "014c395297c0d3b4434f8d3dc668d826051ccdd6eec4e06a2e734dda69c64de7"
     },
     {
       "path": "test/mockOverleafHttpServer.test.cjs",
@@ -1498,6 +1508,11 @@
       "path": "test/referenceNavigation.test.cjs",
       "bytes": 2275,
       "sha256": "caf5201c24fccd3a4002846d72b87460a033fe7dd0756523f92a8bb24dbada13"
+    },
+    {
+      "path": "test/releaseSmokeLauncher.test.cjs",
+      "bytes": 3154,
+      "sha256": "fc27e8e66a3cb7b5045ec152f642e55640fb2c956a73ac5b973d449f9146cab6"
     },
     {
       "path": "test/remoteFileSystemSync.test.cjs",
@@ -1643,6 +1658,11 @@
       "path": "test/vscodeCommentGlyphPatch.test.cjs",
       "bytes": 1065,
       "sha256": "bd63d94b5ecca9eb224f9359f2ae9e98f4875e2c78a258eb81ffb865157f0dab"
+    },
+    {
+      "path": "test/vscodeTestDownload.test.cjs",
+      "bytes": 1717,
+      "sha256": "ca3088a3eb7706105942332a5181bc4a777a2dc5215f5360223c6989cc658b5f"
     },
     {
       "path": "tsconfig.json",

@@ -75,13 +75,14 @@ test('metadata protection does not read, overwrite, or chmod a symlinked gitigno
     try {
         const metadataRoot=path.join(tempRoot,'.overleaf'); const target=path.join(tempRoot,'private');
         await fs.mkdir(metadataRoot);await fs.writeFile(target,'keep',{mode:0o644});
-        // Establish the fixture's exact mode even under a restrictive umask, so
-        // following the symlink and chmodding its target to 0600 is detectable.
+        // Record the filesystem's actual mode: Windows does not implement POSIX
+        // permission bits, while POSIX umasks can also change the initial mode.
         await fs.chmod(target,0o644);
+        const modeBefore = (await fs.stat(target)).mode & 0o777;
         await fs.symlink(target,path.join(metadataRoot,'.gitignore'));
         await ensureLocalReplicaMetadataDirectory(vscodeMock.Uri.file(metadataRoot));
         assert.equal(await fs.readFile(target,'utf8'),'keep');
-        assert.equal((await fs.stat(target)).mode & 0o777,0o644);
+        assert.equal((await fs.stat(target)).mode & 0o777,modeBefore);
     } finally {await fs.rm(tempRoot,{force:true,recursive:true});}
 });
 

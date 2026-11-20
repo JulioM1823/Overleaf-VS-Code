@@ -11,19 +11,21 @@ const {
 } = require('../out/scm/localReplicaResolution.js');
 
 test('buildDeterministicLocalSearchRoots prioritizes known replica parents and deduplicates roots', () => {
+    const homeDirectory = path.join(os.tmpdir(), 'overleaf-resolution-home');
+    const localPath = (...parts) => path.join(homeDirectory, ...parts);
     const roots = buildDeterministicLocalSearchRoots({
-        cachedRoots: ['/Users/example/Documents', '/Users/example/Documents'],
-        existingReplicaPaths: ['/Users/example/Projects/Thesis', '/Users/example/Projects/Paper'],
-        homeDirectory: '/Users/example',
-        workspaceFolderPaths: ['/Users/example/Workspace'],
+        cachedRoots: [localPath('Documents'), localPath('Documents')],
+        existingReplicaPaths: [localPath('Projects', 'Thesis'), localPath('Projects', 'Paper')],
+        homeDirectory,
+        workspaceFolderPaths: [localPath('Workspace')],
     });
 
     assert.deepEqual(roots, [
-        '/Users/example/Projects',
-        '/Users/example/Workspace',
-        '/Users/example/Documents',
-        '/Users/example/Desktop',
-        '/Users/example/Downloads',
+        localPath('Projects'),
+        localPath('Workspace'),
+        localPath('Documents'),
+        localPath('Desktop'),
+        localPath('Downloads'),
     ]);
 });
 

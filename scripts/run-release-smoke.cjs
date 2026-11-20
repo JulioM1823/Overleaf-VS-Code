@@ -8,6 +8,31 @@ const crypto = require('node:crypto');
 const {spawn} = require('node:child_process');
 const JSZip = require('jszip');
 
+function resolveCliScript(executable, platform = process.platform) {
+    const applicationRoot = path.dirname(executable);
+    const directPath = path.resolve(applicationRoot, platform === 'darwin'
+        ? '../Resources/app/out/cli.js' : 'resources/app/out/cli.js');
+    if (fs.existsSync(directPath)) { return directPath; }
+    // Recent Windows archives keep resources in a versioned directory. Read
+    // the official launcher as data; never execute a .cmd file through a shell.
+    if (platform === 'win32') {
+        const launcherName = /insiders/i.test(path.basename(executable)) ? 'code-insiders.cmd' : 'code.cmd';
+        const launcher = path.join(applicationRoot, 'bin', launcherName);
+        if (fs.existsSync(launcher)) {
+            const match = fs.readFileSync(launcher, 'utf8').match(/"%~dp0([^"\r\n]*[\\/]cli\.js)"/i);
+            assert(match && !/[%\r\n]/.test(match[1]) && !path.win32.isAbsolute(match[1]), 'VS Code CLI launcher must contain a relative cli.js entrypoint');
+            const candidate = path.resolve(path.dirname(launcher), ...match[1].split(/[\\/]/));
+            const relative = path.relative(applicationRoot, candidate);
+            assert(relative && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative), 'VS Code CLI entrypoint must remain inside its application directory');
+            assert(fs.existsSync(candidate) && fs.statSync(candidate).isFile(), 'VS Code CLI entrypoint is missing');
+            const realRelative = path.relative(fs.realpathSync(applicationRoot), fs.realpathSync(candidate));
+            assert(realRelative && realRelative !== '..' && !realRelative.startsWith('..' + path.sep) && !path.isAbsolute(realRelative), 'VS Code CLI entrypoint must remain inside its application directory');
+            return candidate;
+        }
+    }
+    throw new Error('VS Code CLI entrypoint is missing');
+}
+
 function run(executable, args, env, timeoutMs) {
     return new Promise((resolve, reject) => {
         const child = spawn(executable, args, {env, stdio: ['ignore', 'pipe', 'pipe']});
@@ -39,9 +64,8 @@ async function main() {
     assert(fs.existsSync(executable), 'Set RELEASE_SMOKE_CODE to the installed VS Code executable');
     // Invoke the CLI's JS entrypoint directly: Windows .cmd launchers require
     // shell quoting and `unzip` is not installed on every supported platform.
-    const cliScript = path.resolve(path.dirname(executable), process.platform === 'darwin'
-        ? '../Resources/app/out/cli.js' : 'resources/app/out/cli.js');
     const cliOverride = process.env.RELEASE_SMOKE_CODE_CLI;
+    const cliScript = cliOverride ? undefined : resolveCliScript(executable);
     assert(fs.existsSync(cliOverride || cliScript), 'VS Code CLI entrypoint is missing');
     const cli = cliOverride || executable;
     const cliPrefix = cliOverride ? [] : [cliScript, '--ms-enable-electron-run-as-node'];
@@ -59,6 +83,8 @@ async function main() {
     const hostReport = path.join(profile, 'extension-host-report.json');
     const reportPath = path.resolve(process.env.RELEASE_SMOKE_REPORT || path.join(root, 'output', 'release', `${manifest.name}-${manifest.version}-smoke.json`));
     fs.mkdirSync(path.dirname(reportPath), {recursive: true});
+    const cleanEditorOnly = process.env.RELEASE_SMOKE_CLEAN_EDITOR_ONLY === '1';
+    const softwareRendering = process.env.RELEASE_SMOKE_DISABLE_GPU === '1';
     const report = {
         status: 'running',
         vsixPath,
@@ -68,6 +94,9 @@ async function main() {
         cleanProfile: profile,
         credentialsCopied: false,
         sandboxDisabled: false,
+        softwareRendering,
+        mode: cleanEditorOnly ? 'clean-editor-control' : 'installed-package',
+        host: {platform: process.platform, arch: process.arch, osRelease: os.release()},
     };
     const save = () => fs.writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n', {mode: 0o600});
     const settingsPath = path.join(userData, 'User', 'settings.json');
@@ -78,19 +107,25 @@ async function main() {
     try {
         const profileArgs = ['--user-data-dir', userData, '--extensions-dir', extensions];
         const cliRun = args => run(cli, [...cliPrefix, ...profileArgs, ...args], cliEnv, 90000);
-        await cliRun(['--install-extension', vsixPath, '--force']);
-        report.exactVsixInstalled = true;
-        assert((await cliRun(['--list-extensions', '--show-versions'])).toLowerCase().includes(`${extensionId}@${manifest.version}`.toLowerCase()));
-        await cliRun(['--install-extension', vsixPath, '--force']);
-        assert.deepEqual(fs.readFileSync(settingsPath), settingsBytes, 'Reinstall must preserve user settings');
-        report.reinstallPreservedSettings = true;
+        if (cleanEditorOnly) {
+            assert(!(await cliRun(['--list-extensions'])).toLowerCase().split(/\r?\n/).includes(extensionId.toLowerCase()), 'Clean editor control must not install the audited extension');
+            report.exactVsixInstalled = false;
+        } else {
+            await cliRun(['--install-extension', vsixPath, '--force']);
+            report.exactVsixInstalled = true;
+            assert((await cliRun(['--list-extensions', '--show-versions'])).toLowerCase().includes(`${extensionId}@${manifest.version}`.toLowerCase()));
+            await cliRun(['--install-extension', vsixPath, '--force']);
+            assert.deepEqual(fs.readFileSync(settingsPath), settingsBytes, 'Reinstall must preserve user settings');
+            report.reinstallPreservedSettings = true;
+        }
         save();
         await run(executable, [
             ...profileArgs,
             '--extensionDevelopmentPath=' + path.join(root, 'test/integration/release-driver'),
-            '--extensionTestsPath=' + path.join(root, 'test/integration/release-driver/smoke.cjs'),
+            '--extensionTestsPath=' + path.join(root, 'test/integration/release-driver', cleanEditorOnly ? 'baseline.cjs' : 'smoke.cjs'),
             '--disable-updates', '--skip-welcome', '--skip-release-notes',
             '--disable-telemetry', '--new-window',
+            ...(softwareRendering ? ['--disable-gpu'] : []),
         ], {...env,
             RELEASE_SMOKE_EXTENSION_ID: extensionId,
             RELEASE_SMOKE_VERSION: manifest.version,
@@ -102,17 +137,19 @@ async function main() {
         report.extensionHost = JSON.parse(fs.readFileSync(hostReport, 'utf8'));
         assert.equal(report.extensionHost.status, 'passed', 'Installed extension host checks must pass');
 
-        report.defaultServer = report.extensionHost.defaultServer;
-        await cliRun(['--uninstall-extension', extensionId]);
-        assert(!(await cliRun(['--list-extensions'])).toLowerCase().split(/\r?\n/).includes(extensionId.toLowerCase()));
-        assert.deepEqual(fs.readFileSync(settingsPath), settingsBytes, 'Uninstall must preserve user settings');
-        await cliRun(['--install-extension', vsixPath, '--force']);
-        assert((await cliRun(['--list-extensions', '--show-versions'])).toLowerCase().includes(`${extensionId}@${manifest.version}`.toLowerCase()));
-        assert.deepEqual(fs.readFileSync(settingsPath), settingsBytes, 'Reinstallation must preserve user settings');
-        report.uninstallReinstallPreservedSettings = true;
+        if (!cleanEditorOnly) {
+            report.defaultServer = report.extensionHost.defaultServer;
+            await cliRun(['--uninstall-extension', extensionId]);
+            assert(!(await cliRun(['--list-extensions'])).toLowerCase().split(/\r?\n/).includes(extensionId.toLowerCase()));
+            assert.deepEqual(fs.readFileSync(settingsPath), settingsBytes, 'Uninstall must preserve user settings');
+            await cliRun(['--install-extension', vsixPath, '--force']);
+            assert((await cliRun(['--list-extensions', '--show-versions'])).toLowerCase().includes(`${extensionId}@${manifest.version}`.toLowerCase()));
+            assert.deepEqual(fs.readFileSync(settingsPath), settingsBytes, 'Reinstallation must preserve user settings');
+            report.uninstallReinstallPreservedSettings = true;
+        }
         report.status = 'passed';
         save();
-        console.log(`Exact-installed-package smoke passed. Report: ${reportPath}`);
+        console.log(`${cleanEditorOnly ? 'Clean-editor control' : 'Exact-installed-package smoke'} passed. Report: ${reportPath}`);
         console.log(`Isolated profile retained for inspection: ${profile}`);
     } catch (error) {
         if (fs.existsSync(hostReport)) {
@@ -125,4 +162,7 @@ async function main() {
     }
 }
 
-main().catch(error => { console.error(error.message); process.exitCode = 1; });
+module.exports = {resolveCliScript};
+if (require.main === module) {
+    main().catch(error => { console.error(error.message); process.exitCode = 1; });
+}
