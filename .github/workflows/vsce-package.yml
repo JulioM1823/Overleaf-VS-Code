@@ -32,7 +32,7 @@ jobs:
       - name: Verify the final audited distribution
         id: verify_distribution
         run: >-
-          node -e "const fs = require('node:fs'); const assert = require('node:assert/strict'); const {createHash} = require('node:crypto'); assert.equal(createHash('sha256').update(fs.readFileSync('audit-distribution.vsix')).digest('hex'), '42ce8a128fb4b58feb70f2fe134051471d2ffd482b8e2b4f416d1b98f45f5a73');"
+          node -e "const fs = require('node:fs'); const assert = require('node:assert/strict'); const {createHash} = require('node:crypto'); assert.equal(createHash('sha256').update(fs.readFileSync('audit-distribution.vsix')).digest('hex'), '6c55c652d352e91c2dd82a0787decd9c59badae6e79f243a63619fb7d21a74cd');"
       - run: npm ci && npm ci --prefix views/chat-view
       - run: npm test
       - run: npx --yes @vscode/vsce@4.1.0 package --out orbitleaf.vsix

@@ -2,7 +2,7 @@
   "extensionId": "AstroJulio.orbitleaf",
   "version": "0.16.8",
   "archive": "orbitleaf-0.16.8-source.zip",
-  "sha256": "b2480f017bd8e8e5991ef020c641496614d94b0cad564e115cb3325924d64d35",
+  "sha256": "a03e834efebdb693fcb512ae380c5306577eefea7ca947d0597b80c5e272ba29",
   "files": [
     {
       "path": ".eslintrc.json",
@@ -41,8 +41,8 @@
     },
     {
       "path": ".github/workflows/vsce-package.yml",
-      "bytes": 2268,
-      "sha256": "1cba117ad0a67455518be9999a9da97f4d0682d9e98a142ca9f13fb9cf7c054f"
+      "bytes": 2546,
+      "sha256": "0659f812f7eacbbb08b3a6d545dacd5464c16c9b1efb4436ab5eb501b1d4a6cf"
     },
     {
       "path": ".github/workflows/vsce-publish.yml",
@@ -301,8 +301,8 @@
     },
     {
       "path": "scripts/self-hosted-phase-report.cjs",
-      "bytes": 5218,
-      "sha256": "70eea2589d3092880c29585f083684eb8560e7424513dcebe0f37c91bdb0a530"
+      "bytes": 5867,
+      "sha256": "74d91da4e600bb75ed0a137b3bcc589c424c1c4cc20f87c1d8b6543e378d6542"
     },
     {
       "path": "scripts/validate-release.cjs",
@@ -331,8 +331,8 @@
     },
     {
       "path": "src/api/base.ts",
-      "bytes": 70169,
-      "sha256": "138ccfafbf9529c29875d00dd11a15819716d068c286802568fd51cb871bed3c"
+      "bytes": 71002,
+      "sha256": "61ddd86e06ed9f17558c3cd30caad60be4caa7ef6ba56395a9f44f12599ab5c5"
     },
     {
       "path": "src/api/cookieHelpers.ts",
@@ -686,8 +686,8 @@
     },
     {
       "path": "src/core/projectManagerProvider.ts",
-      "bytes": 77741,
-      "sha256": "0d0c5008e19268fb8d32fcefcf33217a0310eecac18a12fd76e4eb4c2e0bf1d5"
+      "bytes": 80041,
+      "sha256": "c5b11a08d0224eb2704fd0db853d7076620bbb67a4424a7587edce1d6f794ade"
     },
     {
       "path": "src/core/projectWorkspaceBinding.ts",
@@ -896,8 +896,8 @@
     },
     {
       "path": "src/utils/globalStateManager.ts",
-      "bytes": 25960,
-      "sha256": "5c8851d0e7f8419e6e95fc229a688602143fd8076570a6d660b5c606270841b2"
+      "bytes": 28212,
+      "sha256": "68316e99525a42e7eb3c5f016f757b88b5c4943a95aa5aae504266f18b8e6cd3"
     },
     {
       "path": "src/utils/latestTaskQueue.ts",
@@ -946,8 +946,8 @@
     },
     {
       "path": "test/baseTransportSecurity.test.cjs",
-      "bytes": 6803,
-      "sha256": "3e9f3d81a75d238836c20c768540df39071f0c774059367d90b682ff8cd88f91"
+      "bytes": 8247,
+      "sha256": "cd00ae8ca8d7e33fc661db9dbdd3ddd6719722f720df49d66718e669d22bcbe0"
     },
     {
       "path": "test/buildDependencySecurity.test.cjs",
@@ -1351,13 +1351,13 @@
     },
     {
       "path": "test/integration/selfHostedAcceptance.cjs",
-      "bytes": 7724,
-      "sha256": "99d2831872a493df580c09c9852323af5ae6b21ff4cd68076aac0471ea43f370"
+      "bytes": 9008,
+      "sha256": "67e8c96749b6a23c82bc29050da9968823749485d93c09605cb6925313d1d334"
     },
     {
       "path": "test/integration/selfHostedAcceptanceExtras.cjs",
-      "bytes": 5915,
-      "sha256": "c75b0b4830b6eb5ea15d7de2571c548c1d4a75166476163e66c9831253f67967"
+      "bytes": 6134,
+      "sha256": "c0e1b1716ac5d68b1179705fb2adedfdd7415bda71f728a63a7b9cddc0fee56e"
     },
     {
       "path": "test/integration/webviewProbe.js",
@@ -1560,6 +1560,11 @@
       "sha256": "6f2ed6098356b940cc768a5d50b464c4aaac483820c5a5c18f404c53378c3dab"
     },
     {
+      "path": "test/projectManagerRefreshReliability.test.cjs",
+      "bytes": 20701,
+      "sha256": "0d50b448bdb1fefc1917eff02bc6e6169d09a5ddfd33838f63bcbf3258005670"
+    },
+    {
       "path": "test/projectSearch.test.cjs",
       "bytes": 2521,
       "sha256": "b6cf3802634310bc51d8ee8b1b6313a86b5fc4d96755fc4cffaeb2664660753f"
@@ -1636,8 +1641,8 @@
     },
     {
       "path": "test/selfHostedAcceptanceLifecycle.test.cjs",
-      "bytes": 8455,
-      "sha256": "9e6468c183cd0f516e261bd46d65fe8872f9c172282004e58d0ad9aa81dbcf0e"
+      "bytes": 9630,
+      "sha256": "02e2d985c371fd0d6b72f60e31fe5e0edff16796b77985d19cb03bc9bef9c9bf"
     },
     {
       "path": "test/socketAcknowledgement.test.cjs",
