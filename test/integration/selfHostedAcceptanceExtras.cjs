@@ -31,8 +31,12 @@ exports.run = async ({vfs, uri, docId, projectId, effects}) => {
     effects.push({scenario: 'authenticated-chat-send-server-readback', passed: true});
 
     const comment = 'Synthetic CE review ' + crypto.randomUUID();
+    const session = await vfs.ensureTextDocumentSession(uri);
+    assert.equal(session.localText, session.remoteText, 'Positive comment workflow starts from a synchronized document');
+    const selectedText = session.localText.slice(0, 5);
+    assert.equal(selectedText.length, 5);
     const threadId = await vfs.createComment(uri, new vscode.Range(0, 0, 0, 5), comment,
-        {startOffset: 0, endOffset: 5, selectedText: '% col'});
+        {startOffset: 0, endOffset: 5, selectedText});
     assert(threadId, 'Production VFS must create a comment thread');
     const threads = await vfs.api.getCommentThreads(identity, projectId);
     assert.equal(threads.type, 'success');

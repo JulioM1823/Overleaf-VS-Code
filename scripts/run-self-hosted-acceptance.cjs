@@ -79,7 +79,7 @@ async function main() {
         await docker(['up', '-d', 'server']);
         await serverReady();
         const bootstrap = `import fs from 'node:fs';\nimport Registration from './app/src/Features/User/UserRegistrationHandler.mjs';\nconst accounts=JSON.parse(fs.readFileSync(0,'utf8'));\nfor(const account of accounts){await Registration.promises.registerNewUser(account);}\nprocess.exit(0);`;
-        await docker(['exec', '-T', '-w', '/var/www/overleaf/services/web', 'server', 'node', '--input-type=module', '-e', bootstrap], {input: JSON.stringify(accounts)});
+        await docker(['exec', '-T', '-w', '/overleaf/services/web', 'server', 'node', '--input-type=module', '-e', bootstrap], {input: JSON.stringify(accounts)});
         console.log('Acceptance: two synthetic server accounts created; starting isolated native editor.');
         const executable = await downloadAndUnzipVSCode({version,
             cachePath: process.env.OVERLEAF_VSCODE_CACHE || path.join(os.tmpdir(), 'overleaf-vscode-compat')});
