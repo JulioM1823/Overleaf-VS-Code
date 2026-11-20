@@ -6,6 +6,7 @@ It exists to keep implementation plans realistic and to reduce repeated investig
 ## Visual Studio Code
 
 Overleaf-VS Code is developed and validated against Visual Studio Code's extension APIs.
+The November 19–20, 2026 audit exercised VS Code 1.80.0 and 1.147.0 in actual Windows Server 2022/2025 x64, Ubuntu 22.04 x64/ARM64 and macOS ARM64 environments. Isolated VSIX installation, native renderer fixtures and authenticated workflows are separate evidence: real hosted Overleaf ran on a normal macOS development host, and official Community Edition 6.3.4 ran with normal Linux development hosts and encrypted SecretStorage. The TypeScript build remains pinned to the 1.80.0 API definitions. The [release-readiness report](release-readiness-2026-11-19.md) identifies exact artifacts, versions, failures and limitations; these results do not establish Windows client editions, other architectures, every editor version or every server deployment.
 The extension's core workflows are expected to work in VS Code:
 
 - server authentication
@@ -54,10 +55,6 @@ The extension's core workflows are expected to work in VS Code:
 
 ## Review Panel and Comments
 
-- Status: blocked for full parity.
-- Constraint:
-  - Full review-panel support would require stable access to comment, reply, resolve, and tracked-change data that is not documented as a public extension API surface.
-- Supported expectation:
-  - Deep links and read-only alternatives are feasible if reliable payloads are available.
-- Current recommendation:
-  - Treat full review-panel support as blocked until stable backend data access is demonstrated.
+- Comment threads, replies, resolution, anchors, offline state and replay have implementations and regression coverage. Availability depends on the server protocol and project permissions.
+- These server interfaces are not a stable public extension API. Local fixture tests do not establish compatibility with every hosted/self-hosted deployment or full parity with Overleaf's review and tracked-change features.
+- The exact official Community Edition 6.3.4 image used in acceptance testing omits its track-changes module and comment routes. An authenticated request to the production comment endpoint returned Not Found, while the same owner could read its project. Comment CRUD is therefore recorded as unsupported for that image, not a passing test. Real CE authentication, editing, chat, compilation/PDF download and restart recovery were tested separately; hosted comment CRUD remains unverified.

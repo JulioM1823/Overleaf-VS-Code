@@ -1,5 +1,7 @@
 # Platform VM and hosted-runner audit — 2026-11-19
 
+> Historical 0.16.7 platform evidence. See the [0.16.8 release-readiness follow-up](release-readiness-2026-11-19.md) for the newer candidate, additional corrections and new execution results. Hashes and failures below continue to identify their original artifacts.
+
 This report supplements [the pre-release audit](pre-release-audit-2026-11-19.md) with actual execution outside the development Mac. The final **330 candidate** passed fresh Ubuntu ARM64 VM verification and **all six hosted Windows/Linux/macOS jobs** on VS Code 1.80.0 and 1.147.0: **739/739 regression tests per job**, installed-package checks and native production-provider chat/PDF fixtures. The Windows default-graphics diagnostic JSONs also passed independently of the workflow summaries. Earlier failures and superseded snapshots remain recorded below.
 
 ## Final result
