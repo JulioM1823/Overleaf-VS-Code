@@ -37,8 +37,11 @@ function completePhase(filename, phase, phaseRunId, details = {}) {
     checkEvidence(report, phase);
     return writeReport(filename, {...report, status: 'passed', phase, phaseRunId});
 }
-function verifyPhase(filename, phase, phaseRunId) {
+function verifyPhase(filename, phase, phaseRunId, observe) {
     const report = readReport(filename);
+    // Retain the credential-free current phase evidence even when validation
+    // rejects it; the parent removes its private working directory afterwards.
+    observe?.(report);
     assert.equal(report.status, 'passed', `Self-hosted ${phase} must pass`);
     assert.equal(report.phase, phase, 'Report must belong to the requested phase');
     assert.equal(report.phaseRunId, phaseRunId, 'Report must belong to this fresh launch');

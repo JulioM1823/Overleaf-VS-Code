@@ -15,6 +15,16 @@ exports.run = async () => {
     const reportPath = process.env.OVERLEAF_LIVE_REPORT;
     const phase = process.env.OVERLEAF_CE_PHASE;
     let stage = 'activate';
+    const socketModule = require.cache[require.resolve(path.join(root, 'out/api/socketioAlt'))];
+    const targetWindow = socketModule?.require('vscode').window;
+    const apiSurface = {targetWindowShared: targetWindow === vscode.window,
+        targetWarningWritable: !!Object.getOwnPropertyDescriptor(targetWindow || {}, 'showWarningMessage')?.writable};
+    const progress = {contextCaptured: false, passwordLoginChecked: false, secretStorageMetadataChecked: false, projectReady: false};
+    const checkpoint = () => {
+        const current = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+        fs.writeFileSync(reportPath, JSON.stringify({...current, stage, progress, apiSurface}, null, 2) + '\n', {mode: 0o600});
+    };
+    checkpoint();
     const getServers = GlobalStateManager.getServers;
     let context;
     GlobalStateManager.getServers = function (...args) { context = args[0]; return getServers.apply(this, args); };
@@ -34,9 +44,10 @@ exports.run = async () => {
         const deadline = Date.now() + 15000;
         while (!context && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
         assert(context, 'Actual extension context must be observed from its tree');
+        progress.contextCaptured = true;
         GlobalStateManager.getServers = getServers;
         GlobalStateManager.addServer(context, url.host, url.href);
-        stage = 'real-password-login-and-secret-storage';
+        stage = 'real-password-login-and-secret-storage'; checkpoint();
         const api = new BaseAPI(url.href);
         let login;
         if (phase === 'initial') {
@@ -49,23 +60,26 @@ exports.run = async () => {
             login = await api.cookiesLogin(identity.cookies);
         }
         assert.equal(login.type, 'success'); assert(login.identity && login.userInfo);
+        progress.passwordLoginChecked = true; checkpoint();
         const metadataOnly = context.globalState.get('overleaf-servers', {})[url.host];
         assert(metadataOnly.login.identitySecretKey && !metadataOnly.login.identity, 'Credentials remain in SecretStorage, not global state');
+        progress.secretStorageMetadataChecked = true; checkpoint();
         let state;
         if (phase === 'initial') {
-            stage = 'create-disposable-project';
+            stage = 'create-disposable-project'; checkpoint();
             state = {projectName: 'Overleaf Workshop Reliability Audit ' + crypto.randomUUID(), userId: login.userInfo.userId};
             const created = await api.newProject(login.identity, state.projectName, 'none');
             assert.equal(created.type, 'success'); assert(created.message);
             state.projectId = created.message;
             fs.writeFileSync(process.env.OVERLEAF_CE_STATE_FILE, JSON.stringify(state), {mode: 0o600});
         } else state = JSON.parse(fs.readFileSync(process.env.OVERLEAF_CE_STATE_FILE, 'utf8'));
+        progress.projectReady = true;
         process.env.OVERLEAF_TEST_PROJECT = state.projectId;
         process.env.OVERLEAF_TEST_USER = state.userId;
         process.env.OVERLEAF_TEST_SERVER = url.host;
         process.env.OVERLEAF_TEST_PROJECT_NAME = state.projectName;
         process.env.OVERLEAF_TEST_PHASE = phase;
-        stage = 'live-production-vfs-scenarios';
+        stage = 'live-production-vfs-scenarios'; checkpoint();
         await require('./liveSync.cjs').run();
         completePhase(reportPath, phase, process.env.OVERLEAF_CE_PHASE_RUN_ID, {
             genuineSelfHostedServer: true, passwordLogin: 'passed through production BaseAPI and GlobalStateManager',
@@ -76,6 +90,8 @@ exports.run = async () => {
             error instanceof assert.AssertionError ? error.message : 'Acceptance operation failed; sensitive server response omitted.');
         const failed = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
         failed.stage = stage;
+        failed.progress = progress;
+        failed.apiSurface = apiSurface;
         fs.writeFileSync(reportPath, JSON.stringify(failed, null, 2) + '\n', {mode: 0o600});
         throw new Error(`Self-hosted acceptance failed at ${stage}`);
     } finally {

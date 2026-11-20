@@ -144,13 +144,18 @@ async function main() {
             console.log(`Acceptance: ${phase} native extension-host phase.`);
             const phaseRunId = crypto.randomUUID();
             beginPhase(env.OVERLEAF_LIVE_REPORT, phase, phaseRunId);
-            await command(executable, ['--user-data-dir', path.join(profile, 'user'), '--extensions-dir', path.join(profile, 'extensions'),
+            let executionError;
+            try { await command(executable, ['--user-data-dir', path.join(profile, 'user'), '--extensions-dir', path.join(profile, 'extensions'),
                 '--extensionDevelopmentPath=' + root,
                 '--extensionDevelopmentPath=' + path.join(root, 'test/integration/self-hosted-driver'),
                 '--disable-extensions', '--disable-updates', '--skip-welcome', '--skip-release-notes', '--disable-telemetry', '--new-window'],
-            {env: {...env, OVERLEAF_CE_PHASE: phase, OVERLEAF_CE_PHASE_RUN_ID: phaseRunId}, timeout: 720000, inherit: true});
-            const live = verifyPhase(env.OVERLEAF_LIVE_REPORT, phase, phaseRunId);
-            report.phases.push({phase, ...live}); save();
+            {env: {...env, OVERLEAF_CE_PHASE: phase, OVERLEAF_CE_PHASE_RUN_ID: phaseRunId}, timeout: 720000, inherit: true}); }
+            catch (error) { executionError = error; }
+            verifyPhase(env.OVERLEAF_LIVE_REPORT, phase, phaseRunId, live => {
+                report.phases.push({...live, requestedPhase: phase, expectedPhaseRunId: phaseRunId,
+                    ...(executionError ? {hostExecutionFailure: executionError.message} : {})}); save();
+            });
+            if (executionError) throw executionError;
         };
         await launch('initial');
         console.log('Acceptance: restarting the genuine server before persisted-draft/editor restart phase.');

@@ -79,3 +79,15 @@ test('the outer failure preserves a current detailed failure but never a previou
     assert.equal(failPhase(file, 'restart', 'fresh', 'Outer driver failed').reason, 'Specific current assertion failed');
     assert.equal(failPhase(file, 'restart', 'different', 'New launch failed').reason, 'New launch failed');
 });
+
+test('failed phase diagnostics are published before verification rejects and private files can be removed', t => {
+    const file = reportFile(t);
+    beginPhase(file, 'initial', 'fresh');
+    failPhase(file, 'initial', 'fresh', 'Synthetic password login failed');
+    let retained;
+    assert.throws(() => verifyPhase(file, 'initial', 'fresh', report => {retained = report;}), /must pass/);
+    fs.rmSync(file);
+    assert.equal(retained.status, 'failed');
+    assert.equal(retained.phaseRunId, 'fresh');
+    assert.equal(retained.reason, 'Synthetic password login failed');
+});
