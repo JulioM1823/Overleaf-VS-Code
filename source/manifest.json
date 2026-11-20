@@ -2,7 +2,7 @@
   "extensionId": "AstroJulio.orbitleaf",
   "version": "0.16.8",
   "archive": "orbitleaf-0.16.8-source.zip",
-  "sha256": "eb65e65319f50471a48a961328ce8614d3cd787c5a2f44730d05f7855c6da25d",
+  "sha256": "b2480f017bd8e8e5991ef020c641496614d94b0cad564e115cb3325924d64d35",
   "files": [
     {
       "path": ".eslintrc.json",
@@ -36,8 +36,8 @@
     },
     {
       "path": ".github/workflows/release-authenticated.yml",
-      "bytes": 1040,
-      "sha256": "bf69c3f4c7f3e6d6cf1f8bf0ef9b60be39e434e4f8bde9d04f16645809f4f7da"
+      "bytes": 1262,
+      "sha256": "45535d6eb103c6b590567c1b6f88ff827926a52ddac2d771e4537c820c0772c3"
     },
     {
       "path": ".github/workflows/vsce-package.yml",
@@ -286,8 +286,8 @@
     },
     {
       "path": "scripts/run-self-hosted-acceptance.cjs",
-      "bytes": 12665,
-      "sha256": "82e9ab389c9d046d99904019c544188ead4ee4dd8ef5886c657b9004ab369d77"
+      "bytes": 21242,
+      "sha256": "8a35816ea46cffa71e0805bbda91cbad2309c056e9b6d5e2581ae7a9ef64397b"
     },
     {
       "path": "scripts/run-webview-compat.cjs",
@@ -301,8 +301,8 @@
     },
     {
       "path": "scripts/self-hosted-phase-report.cjs",
-      "bytes": 3120,
-      "sha256": "7c6da82be634e93ce0cf5ed5d86cb64baf22ca4b4dfd3a7afa9d58f85c2fcb4d"
+      "bytes": 5218,
+      "sha256": "70eea2589d3092880c29585f083684eb8560e7424513dcebe0f37c91bdb0a530"
     },
     {
       "path": "scripts/validate-release.cjs",
@@ -1351,13 +1351,13 @@
     },
     {
       "path": "test/integration/selfHostedAcceptance.cjs",
-      "bytes": 6549,
-      "sha256": "045c8ad7a5c2237a80933ff084ffb948ec2c677c9802fbf31de40fe87f90beca"
+      "bytes": 7724,
+      "sha256": "99d2831872a493df580c09c9852323af5ae6b21ff4cd68076aac0471ea43f370"
     },
     {
       "path": "test/integration/selfHostedAcceptanceExtras.cjs",
-      "bytes": 4066,
-      "sha256": "6777db8f2f3214fb8fc23d647f6958ba703de6ddce9869f055c6f736aee42505"
+      "bytes": 5915,
+      "sha256": "c75b0b4830b6eb5ea15d7de2571c548c1d4a75166476163e66c9831253f67967"
     },
     {
       "path": "test/integration/webviewProbe.js",
@@ -1636,8 +1636,8 @@
     },
     {
       "path": "test/selfHostedAcceptanceLifecycle.test.cjs",
-      "bytes": 5475,
-      "sha256": "79f48ffbb696c659fdf91f1924cc72dc5db943b76040428429bf0e559e3bccf6"
+      "bytes": 8455,
+      "sha256": "9e6468c183cd0f516e261bd46d65fe8872f9c172282004e58d0ad9aa81dbcf0e"
     },
     {
       "path": "test/socketAcknowledgement.test.cjs",
