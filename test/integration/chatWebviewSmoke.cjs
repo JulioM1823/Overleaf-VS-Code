@@ -116,7 +116,9 @@ exports.run = async function () {
         };
         await provider.resolveWebviewView(adapter, {}, new vscode.CancellationTokenSource().token);
         await ready;
-        const initial = await until(state => state.contents.includes(unsafeText) && state.composer===queuedText);
+        // DOM changes can arrive before the host's final postMessage promise settles.
+        const initial = await until(state => state.contents.includes(unsafeText) && state.composer===queuedText
+            && provider.pendingComposerMessages.length===0 && provider.pendingComposerTextLength===0);
         assert.equal(initial.metrics.readyMessages, 1);
         assert.equal(readyCount, 1);
         assert.equal(initial.contentChildElements, 0);

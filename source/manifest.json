@@ -2,7 +2,7 @@
   "extensionId": "AstroJulio.orbitleaf",
   "version": "0.16.7",
   "archive": "orbitleaf-0.16.7-source.zip",
-  "sha256": "359e9f89fbaf61bd064945b6678258c0bdc451964c6aa9de985489c7b10e9809",
+  "sha256": "d07e3d8b1affa34b8f9673fd0f966cf14a4c45641611a296dc60d2cd66e83645",
   "files": [
     {
       "path": ".eslintrc.json",
@@ -1201,8 +1201,8 @@
     },
     {
       "path": "test/integration/chatWebviewSmoke.cjs",
-      "bytes": 10865,
-      "sha256": "461013d5ff232299288830c1067167f097d79a3f7e886a2253600df85ce033c1"
+      "bytes": 11053,
+      "sha256": "a23d0f5ba9212861d54e6d6b317ab7b88b43b71c210f92dce961177bddafef28"
     },
     {
       "path": "test/integration/comment-glyph-driver/index.cjs",
