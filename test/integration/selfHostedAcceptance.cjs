@@ -110,6 +110,7 @@ exports.run = async () => {
         stage = 'live-production-vfs-scenarios'; checkpoint();
         await require('./liveSync.cjs').run();
         completePhase(reportPath, phase, process.env.OVERLEAF_CE_PHASE_RUN_ID, {
+            limitation: 'Two editing clients share the owner account; a separate synthetic account was verified denied access. Cross-account collaborative editing was not tested.',
             genuineSelfHostedServer: true, passwordLogin: 'passed through production BaseAPI and GlobalStateManager',
             secretStorageOnly: true, normalExtensionHost: true, reauthenticatedAfterRestart: false,
             serverRestartBeforePhase: phase === 'restart'});

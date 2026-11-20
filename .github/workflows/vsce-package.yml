@@ -11,8 +11,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-latest, windows-latest]
+        os: [ubuntu-22.04, macos-latest]
         vscode: ['1.80.0', stable]
+        include:
+          # VS Code 1.80's unextended Electron renderer intermittently crashes
+          # on the Windows 2025 runner. Keep that evidence; run its gate on 2022.
+          - os: windows-2022
+            vscode: '1.80.0'
+          - os: windows-latest
+            vscode: stable
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     env:

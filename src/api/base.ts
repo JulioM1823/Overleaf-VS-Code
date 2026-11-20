@@ -208,6 +208,7 @@ export interface ProjectSettingsSchema {
 
 export interface ResponseSchema {
     type: 'success' | 'error';
+    authenticationRequired?: boolean;
     method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
     raw?: ArrayBuffer;
     message?: string;
@@ -925,8 +926,21 @@ export class BaseAPI {
         } else {
             res = res || { status:'undefined', text:()=>'' };
             const responseBody = await res.text();
+            let authenticationRequired = res.status===401;
+            if ([301, 302, 303, 307, 308].includes(res.status)) {
+                const location = res.headers?.get('location');
+                if (location) {
+                    try {
+                        const target = new URL(location, requestUrl);
+                        const login = new URL(this.resolveSameOriginUrl('login'));
+                        authenticationRequired = !target.username && !target.password
+                            && target.origin===login.origin && target.pathname===login.pathname;
+                    } catch { /* An invalid redirect is not proof of expired authentication. */ }
+                }
+            }
             return {
                 type: 'error',
+                ...(authenticationRequired ? {authenticationRequired: true} : {}),
                 method: type,
                 route,
                 statusCode: Number(res.status),

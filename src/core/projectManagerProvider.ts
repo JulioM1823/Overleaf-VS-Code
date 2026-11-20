@@ -6,7 +6,7 @@ import * as path from 'path';
 import stripJsonComments = require('strip-json-comments');
 import { ROOT_NAME } from '../consts';
 import { normalizeBaseApiUrl, ProjectPersist, ProjectTagsResponseSchema, ResponseSchema } from '../api/base';
-import { GlobalStateManager } from '../utils/globalStateManager';
+import { GlobalStateManager, ServerSessionExpiredError } from '../utils/globalStateManager';
 import { logDiagnostic } from '../utils/diagnostics';
 import {
     buildBrowserAssistedLoginMessage,
@@ -47,6 +47,7 @@ type ServerTreeData = {
     projects: ProjectPersist[],
     tags: ProjectTagsResponseSchema[],
 };
+type CurrentServerTreeData<T> = {value: T, isCurrent: () => boolean};
 
 type ActionProgressOptions = {
     location?: vscode.ProgressLocation,
@@ -229,8 +230,8 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
 
     private _onDidChangeTreeData: vscode.EventEmitter<DataItem | undefined | void> = new vscode.EventEmitter<DataItem | undefined | void>();
     private readonly expandedTags = new Set<string>();
-    private readonly serverTreeDataCache = new Map<string, ServerTreeData>();
-    private readonly pendingServerTreeData = new Map<string, Promise<ServerTreeData>>();
+    private readonly serverTreeDataCache = new Map<string, CurrentServerTreeData<ServerTreeData>>();
+    private readonly pendingServerTreeData = new Map<string, CurrentServerTreeData<Promise<ServerTreeData>>>();
     private cachedOpenFolderIconThemeId?: string;
     private cachedOpenFolderIconPath?: ThemeIconPath;
     private refreshSequence = 0;
@@ -635,37 +636,52 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
 
     private async getServerTreeData(server: ServerItem): Promise<ServerTreeData> {
         const cached = this.serverTreeDataCache.get(server.name);
-        if (cached) {
+        if (cached?.isCurrent()) {
             this.logDiagnostic('server_tree_cache.hit', {
-                projectCount: cached.projects.length,
+                projectCount: cached.value.projects.length,
                 serverName: server.name,
-                tagCount: cached.tags.length,
+                tagCount: cached.value.tags.length,
             });
-            return cached;
+            return cached.value;
         }
+        if (cached) { this.serverTreeDataCache.delete(server.name); }
 
         const pending = this.pendingServerTreeData.get(server.name);
-        if (pending) {
+        if (pending?.isCurrent()) {
             this.logDiagnostic('server_tree_cache.pending_reused', {
                 serverName: server.name,
             });
-            return pending;
+            return pending.value;
         }
+        if (pending) { this.pendingServerTreeData.delete(server.name); }
+
+        const sequence = this.refreshSequence;
+        const sessionIsCurrent = GlobalStateManager.captureServerSessionGuard(this.context, server.name);
+        const isCurrent = () => sequence===this.refreshSequence && sessionIsCurrent();
+        const assertCurrent = () => {
+            if (!isCurrent() || this.pendingServerTreeData.get(server.name)?.value!==request) {
+                throw new Error('The project list refresh was superseded. Refresh the server to retry.');
+            }
+        };
 
         this.logDiagnostic('server_tree_cache.fetch_start', {
             serverName: server.name,
         });
         const request = GlobalStateManager.fetchServerProjects(this.context, server.api, server.name)
         .then(projects => {
+            assertCurrent();
             return GlobalStateManager.authenticate(this.context, server.name)
-            .then(identity => server.api.getAllTags(identity))
-            .then(res => ({
-                projects,
-                tags: res.type==='success' ? res.tags as ProjectTagsResponseSchema[] : [],
-            }));
+            .then(identity => { assertCurrent(); return server.api.getAllTags(identity); })
+            .then(res => {
+                if (res.type==='success' && !Array.isArray(res.tags)) {
+                    throw new Error('Overleaf returned an invalid tag list. Refresh the server to retry.');
+                }
+                return {projects, tags: res.type==='success' ? res.tags as ProjectTagsResponseSchema[] : []};
+            });
         })
         .then(data => {
-            this.serverTreeDataCache.set(server.name, data);
+            assertCurrent();
+            this.serverTreeDataCache.set(server.name, {value: data, isCurrent});
             this.logDiagnostic('server_tree_cache.fetch_success', {
                 projectCount: data.projects.length,
                 serverName: server.name,
@@ -674,16 +690,20 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
             return data;
         })
         .catch((error) => {
+            // Invalidated requests must not carry an old expiry into a newer tree.
+            assertCurrent();
             this.logDiagnostic('server_tree_cache.fetch_failed', {
                 serverName: server.name,
             }, error);
             return Promise.reject(error);
         })
         .finally(() => {
-            this.pendingServerTreeData.delete(server.name);
+            if (this.pendingServerTreeData.get(server.name)?.value===request) {
+                this.pendingServerTreeData.delete(server.name);
+            }
         });
 
-        this.pendingServerTreeData.set(server.name, request);
+        this.pendingServerTreeData.set(server.name, {value: request, isCurrent});
         return request;
     }
 
@@ -702,23 +722,32 @@ export class ProjectManagerProvider implements vscode.TreeDataProvider<DataItem>
         if (element) {
             if (element instanceof ServerItem) {
                 const requestId = ++this.childrenRequestSequence;
+                const sequence = this.refreshSequence;
+                const sessionIsCurrent = GlobalStateManager.captureServerSessionGuard(this.context, element.name);
                 this.logDiagnostic('children.server.start', {
                     requestId,
                     serverName: element.name,
                 });
                 return this.getServerTreeData(element)
-                .catch(() => {
-                    // Direct logout if cookie expired
-                    GlobalStateManager.logoutServer(this.context, element.api, element.name)
-                    .then(success => {
-                        if (success) {
-                            this.refresh('server_auto_logout');
-                        }
-                    });
-                    return Promise.reject();
+                .catch(error => {
+                    // A tree/network failure is not proof that credentials expired.
+                    // Even confirmed expiry must belong to this unchanged session.
+                    if (error instanceof ServerSessionExpiredError && error.serverName===element.name
+                        && sequence===this.refreshSequence && sessionIsCurrent() && error.isCurrentSession()) {
+                        void GlobalStateManager.logoutServer(this.context, element.api, element.name)
+                        .then(success => {
+                            if (success) { this.refresh('server_auto_logout'); }
+                        }).catch(logoutError => this.logDiagnostic('server_auto_logout.failed', {serverName: element.name}, logoutError));
+                    }
+                    throw error;
                 })
-                .then(data => this.getOpenFolderIconPath().then(openFolderIconPath => ({...data, openFolderIconPath})))
-                .then(({projects, tags, openFolderIconPath}) => {
+                .then(data => this.getOpenFolderIconPath().then(openFolderIconPath => ({data, openFolderIconPath})))
+                .then(({data, openFolderIconPath}) => {
+                    if (sequence!==this.refreshSequence || !sessionIsCurrent()
+                        || this.serverTreeDataCache.get(element.name)?.value!==data) {
+                        throw new Error('The project list refresh was superseded. Refresh the server to retry.');
+                    }
+                    const {projects, tags} = data;
                     const allTags:{name:string, tid:string}[] = [];
                     // get project items
                     const normalProjects = [], trashedProjects = [], archivedProjects = [];

@@ -15,6 +15,29 @@ Module._load = function(request, parent, main) {
 const {BaseAPI} = require('../out/api/base');
 Module._load = originalLoad;
 
+test('authentication-required metadata accepts only HTTP 401 or the same-origin exact configured login redirect', async () => {
+    const api = new BaseAPI('https://server.example/overleaf/').setIdentity({cookies: 'sid=synthetic', csrfToken: 'synthetic'});
+    const cases = [
+        [401, undefined, true], [403, undefined, false], [503, undefined, false],
+        [302, '/overleaf/login?redirect=sensitive-value', true],
+        [303, 'https://server.example/overleaf/login', true],
+        [307, '../login', true],
+        [302, '/login', false], [302, '/overleaf/login-lookalike', false],
+        [302, '/overleaf/maintenance', false],
+        [302, 'https://foreign.example/overleaf/login', false],
+        [302, 'http://server.example/overleaf/login', false],
+        [302, 'https://user:password@server.example/overleaf/login', false],
+        [302, undefined, false],
+    ];
+    for (const [status, location, expected] of cases) {
+        handler = async () => response('Synthetic failure', {status, headers: location ? {location} : {}});
+        const result = await api.request('GET', 'user/projects');
+        assert.equal(result.authenticationRequired === true, expected, `status ${status}, configured login match ${expected}`);
+        assert.equal(result.redirectLocation, undefined);
+        assert(!JSON.stringify(result).includes('sensitive-value'), 'Redirect parameters must not be retained in failure metadata');
+    }
+});
+
 test('HTTPS archive redirects keep credentials at the configured origin', async () => {
     const calls = [];
     const redirect = response('redirect', {status:302, headers:{location:'https://assets.example/output.pdf?signature=download'}});

@@ -46,6 +46,12 @@ function buildServerIdentitySecretKey(name: string) {
     return `overleaf-workshop.serverIdentity.${encodeURIComponent(name)}`;
 }
 
+function serverIdentitySecretKey(name: string, server?: ServerPersist) {
+    // Legacy inline identities migrate to this deterministic key. Treat that
+    // migration as one session, but distinguish replacement keys from another window.
+    return server?.login ? server.login.identitySecretKey ?? buildServerIdentitySecretKey(name) : undefined;
+}
+
 function isIdentity(value: unknown): value is Identity {
     if (!value || typeof value!=='object') {
         return false;
@@ -63,9 +69,18 @@ function cloneIdentity(identity: Identity): Identity {
     };
 }
 
+/** An explicit authentication failure tied to the session that made the request. */
+export class ServerSessionExpiredError extends Error {
+    readonly code = 'SERVER_SESSION_EXPIRED';
+    constructor(readonly serverName: string, readonly isCurrentSession: () => boolean) {
+        super(buildSessionExpiredMessage());
+        this.name = 'ServerSessionExpiredError';
+    }
+}
+
 export class GlobalStateManager {
     private static readonly identityCaches = new WeakMap<vscode.ExtensionContext, Map<string, Identity>>();
-    private static readonly lifecycles = new WeakMap<vscode.ExtensionContext, Map<string, {generation: number, ending: boolean, loginAttempt: number}>>();
+    private static readonly lifecycles = new WeakMap<vscode.ExtensionContext, Map<string, {generation: number, ending: boolean, loginAttempt: number, pendingLoginAttempt?: number}>>();
 
     private static identityCache(context: vscode.ExtensionContext) {
         let cache = this.identityCaches.get(context);
@@ -87,11 +102,22 @@ export class GlobalStateManager {
         const server = context.globalState.get<ServerPersistMap>(keyServerPersists, {})[name];
         const url = server?.url;
         const userId = server?.login?.userId;
+        const secretKey = serverIdentitySecretKey(name, server);
         return () => {
             const current = context.globalState.get<ServerPersistMap>(keyServerPersists, {})[name];
             return state.generation === generation && (allowEnding || !state.ending)
-                && current !== undefined && current.url === url && current.login?.userId === userId;
+                && current !== undefined && current.url === url && current.login?.userId === userId
+                && serverIdentitySecretKey(name, current) === secretKey;
         };
+    }
+
+    static captureServerSessionGuard(context: vscode.ExtensionContext, name: string): () => boolean {
+        const isCurrent = this.sessionGuard(context, name);
+        const loginAttempt = this.lifecycle(context, name).loginAttempt;
+        // Tree work started before a newer sign-in must not invalidate it.
+        // Transport guards deliberately remain valid during an attempted refresh.
+        return () => isCurrent() && this.lifecycle(context, name).loginAttempt===loginAttempt
+            && this.lifecycle(context, name).pendingLoginAttempt===undefined;
     }
 
     private static logDiagnostic(event: string, fields: Record<string, unknown> = {}, error?: unknown) {
@@ -250,6 +276,7 @@ export class GlobalStateManager {
         if ( persists[name]===undefined ) {
             const state = this.lifecycle(context, name);
             state.generation++;
+            state.pendingLoginAttempt = undefined;
             state.ending = false;
             persists[name] = { name, url };
             context.globalState.update(keyServerPersists, persists);
@@ -264,6 +291,7 @@ export class GlobalStateManager {
         if ( persists[name]!==undefined ) {
             const state = this.lifecycle(context, name);
             state.generation++;
+            state.pendingLoginAttempt = undefined;
             state.ending = true;
             EventBus.fire('serverSessionEndedEvent', {serverName: name});
             void this.deleteServerIdentitySecret(context, name, persists[name]);
@@ -291,47 +319,52 @@ export class GlobalStateManager {
             const lifecycle = this.lifecycle(context, name);
             const startingGeneration = lifecycle.generation;
             const attempt = ++lifecycle.loginAttempt;
-            const res = auth.cookies ? await api.cookiesLogin(auth.cookies) : await api.passportLogin(auth.email, auth.password);
-            const currentPersists = context.globalState.get<ServerPersistMap>(keyServerPersists, {});
-            const currentServer = currentPersists[name];
-            if (lifecycle.generation!==startingGeneration || lifecycle.loginAttempt!==attempt
-                || !currentServer || currentServer.url!==server.url) { return false; }
-            if (res.type==='success' && res.identity!==undefined && res.userInfo!==undefined) {
-                const previousServer = currentServer.login ? {...currentServer, login: {...currentServer.login}} : undefined;
-                // An attempted refresh must not invalidate working requests or
-                // transports until its credentials have been verified.
-                const generation = ++lifecycle.generation;
-                lifecycle.ending = false;
-                // Verify replacement credentials before ending the existing local
-                // session. Do not revoke a browser session merely to refresh login.
-                if (previousServer) { EventBus.fire('serverSessionEndedEvent', {serverName: name}); }
-                currentServer.login = {
-                    userId: res.userInfo.userId,
-                    username: auth.email || res.userInfo.userEmail,
-                    identitySecretKey: `${buildServerIdentitySecretKey(name)}.${randomUUID()}`,
-                };
-                await this.persistServerIdentity(context, currentPersists, name, res.identity);
-                if (previousServer) { await this.deleteServerIdentitySecret(context, name, previousServer); }
-                if (this.lifecycle(context, name).generation !== generation) { return false; }
-                this.logDiagnostic('login.succeeded', {
-                    serverName: name,
-                    userId: res.userInfo.userId,
-                    username: auth.email || res.userInfo.userEmail,
-                    ...authFields,
-                });
-                return true;
-            } else {
-                const failureMessage = res.message ?? buildLoginFailureMessage(authFields.method);
-                this.logDiagnostic('login.failed', {
-                    serverName: name,
-                    ...authFields,
-                }, failureMessage);
-                if (res.message!==undefined) {
-                    vscode.window.showErrorMessage(res.message);
+            lifecycle.pendingLoginAttempt = attempt;
+            try {
+                const res = auth.cookies ? await api.cookiesLogin(auth.cookies) : await api.passportLogin(auth.email, auth.password);
+                const currentPersists = context.globalState.get<ServerPersistMap>(keyServerPersists, {});
+                const currentServer = currentPersists[name];
+                if (lifecycle.generation!==startingGeneration || lifecycle.loginAttempt!==attempt
+                    || !currentServer || currentServer.url!==server.url) { return false; }
+                if (res.type==='success' && res.identity!==undefined && res.userInfo!==undefined) {
+                    const previousServer = currentServer.login ? {...currentServer, login: {...currentServer.login}} : undefined;
+                    // An attempted refresh must not invalidate working requests or
+                    // transports until its credentials have been verified.
+                    const generation = ++lifecycle.generation;
+                    lifecycle.ending = false;
+                    // Verify replacement credentials before ending the existing local
+                    // session. Do not revoke a browser session merely to refresh login.
+                    if (previousServer) { EventBus.fire('serverSessionEndedEvent', {serverName: name}); }
+                    currentServer.login = {
+                        userId: res.userInfo.userId,
+                        username: auth.email || res.userInfo.userEmail,
+                        identitySecretKey: `${buildServerIdentitySecretKey(name)}.${randomUUID()}`,
+                    };
+                    await this.persistServerIdentity(context, currentPersists, name, res.identity);
+                    if (previousServer) { await this.deleteServerIdentitySecret(context, name, previousServer); }
+                    if (this.lifecycle(context, name).generation !== generation) { return false; }
+                    this.logDiagnostic('login.succeeded', {
+                        serverName: name,
+                        userId: res.userInfo.userId,
+                        username: auth.email || res.userInfo.userEmail,
+                        ...authFields,
+                    });
+                    return true;
                 } else {
-                    vscode.window.showErrorMessage(failureMessage);
+                    const failureMessage = res.message ?? buildLoginFailureMessage(authFields.method);
+                    this.logDiagnostic('login.failed', {
+                        serverName: name,
+                        ...authFields,
+                    }, failureMessage);
+                    if (res.message!==undefined) {
+                        vscode.window.showErrorMessage(res.message);
+                    } else {
+                        vscode.window.showErrorMessage(failureMessage);
+                    }
+                    return false;
                 }
-                return false;
+            } finally {
+                if (lifecycle.pendingLoginAttempt===attempt) { lifecycle.pendingLoginAttempt = undefined; }
             }
         } else {
             this.logDiagnostic('login.skipped_existing_session', {
@@ -351,10 +384,17 @@ export class GlobalStateManager {
             serverName: name,
         });
 
+        const lifecycle = this.lifecycle(context, name);
+        if (!server?.login && lifecycle.pendingLoginAttempt!==undefined) {
+            lifecycle.generation++;
+            lifecycle.pendingLoginAttempt = undefined;
+        }
+
         if (server?.login!==undefined) {
             const state = this.lifecycle(context, name);
             const secretKey = server.login.identitySecretKey ?? buildServerIdentitySecretKey(name);
             state.generation++;
+            state.pendingLoginAttempt = undefined;
             state.ending = true;
             const generation = state.generation;
             EventBus.fire('serverSessionEndedEvent', {serverName: name});
@@ -368,8 +408,10 @@ export class GlobalStateManager {
             await this.deleteServerIdentitySecret(context, name, server, secretKey);
             if (state.generation === generation) {
                 const current = context.globalState.get<ServerPersistMap>(keyServerPersists, {});
-                if (current[name]) { delete current[name].login; }
-                await context.globalState.update(keyServerPersists, current);
+                if (current[name] && serverIdentitySecretKey(name, current[name])===secretKey) {
+                    delete current[name].login;
+                    await context.globalState.update(keyServerPersists, current);
+                }
                 state.ending = false;
             }
             this.logDiagnostic('logout.succeeded', {
@@ -430,16 +472,14 @@ export class GlobalStateManager {
                 });
                 return projects;
             } else {
-                // regex match for cookie expired
-                const cookieExpireRegex = /^302/;
-                if (res.message && cookieExpireRegex.test(res.message)) {
+                if (res.authenticationRequired===true) {
                     const message = vscode.l10n.t(buildSessionExpiredMessage());
                     this.logDiagnostic('projects.session_expired', {
                         serverName: name,
                         username: server.login.username,
                     }, res.message);
                     vscode.window.showErrorMessage(message);
-                    return Promise.reject();
+                    throw new ServerSessionExpiredError(name, isCurrent);
                 }
                 this.logDiagnostic('projects.fetch_failed', {
                     serverName: name,
