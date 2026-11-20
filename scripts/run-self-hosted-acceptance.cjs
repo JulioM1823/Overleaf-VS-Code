@@ -141,11 +141,27 @@ async function main() {
         await waitFor(async () => (await docker(['exec', '-T', 'mongo', 'mongosh', '--quiet', '--eval', 'db.hello().isWritablePrimary'])).trim() === 'true', 'MongoDB primary');
         await docker(['up', '-d', 'server']);
         await serverReady();
-        const bootstrap = `let operation='read-account-input';\ntry {\nconst fs=await import('node:fs');\nconst accounts=JSON.parse(fs.readFileSync(0,'utf8'));\noperation='import-registration';\nconst {default:Registration}=await import('./app/src/Features/User/UserRegistrationHandler.mjs');\nfor(const [index,account] of accounts.entries()){operation='register-account-'+index;await Registration.promises.registerNewUser(account);}\nprocess.exit(0);\n} catch(error) {\nconsole.error('ORBITLEAF_BOOTSTRAP_ERROR '+JSON.stringify({operation,errorName:error.name,errorCode:error.code||'none',validationFields:Object.keys(error.errors||{})}));\nprocess.exit(1);\n}`;
+        const bootstrap = `let operation='read-account-input';\ntry {\nconst fs=await import('node:fs');\nconst accounts=JSON.parse(fs.readFileSync(0,'utf8'));\noperation='import-registration';\nconst {default:Registration}=await import('./app/src/Features/User/UserRegistrationHandler.mjs');\nfor(const [index,account] of accounts.entries()){operation='register-account-'+index;await Registration.promises.registerNewUser(account);}\noperation='inspect-ce-capabilities';\nconst {default:Features}=await import('./app/src/infrastructure/Features.mjs');\nconst {default:Settings}=await import('@overleaf/settings');\nconst routers=[];\nfunction collect(directory){for(const entry of fs.readdirSync(directory,{withFileTypes:true})){const filename=directory+'/'+entry.name;if(entry.isDirectory())collect(filename);else if(entry.isFile()&&(entry.name.endsWith('Router.mjs')||entry.name==='router.mjs'))routers.push(filename);}}\ncollect('./app/src');collect('./modules');\nconst capabilities={trackChangesFeature:Features.hasFeature('track-changes'),trackChangesModulePresent:fs.existsSync('./modules/track-changes'),trackChangesModuleConfigured:Settings.moduleImportSequence.includes('track-changes'),commentRoutesPresent:routers.some(filename=>{const source=fs.readFileSync(filename,'utf8');return source.includes('/threads')||source.includes('/thread/');}),routerFilesInspected:routers.length};\nconsole.log('ORBITLEAF_CE_CAPABILITIES '+JSON.stringify(capabilities));\nprocess.exit(0);\n} catch(error) {\nconsole.error('ORBITLEAF_BOOTSTRAP_ERROR '+JSON.stringify({operation,errorName:error.name,errorCode:error.code||'none',validationFields:Object.keys(error.errors||{})}));\nprocess.exit(1);\n}`;
         accountBootstrapStarted = true;
-        await docker(['exec', '-T', 'server', 'bash', '-c',
+        const bootstrapOutput = await docker(['exec', '-T', 'server', 'bash', '-c',
             'source /etc/overleaf/env.sh && source /etc/container_environment.sh && cd /overleaf/services/web && exec node --input-type=module -e "$1"',
             'orbitleaf-acceptance-bootstrap', bootstrap], {input: JSON.stringify(accounts)});
+        const capabilityLine = bootstrapOutput.split(/\r?\n/).find(line => line.startsWith('ORBITLEAF_CE_CAPABILITIES '));
+        if (!capabilityLine) throw new Error('Actual CE feature/source capability evidence is missing');
+        const capabilities = JSON.parse(capabilityLine.slice('ORBITLEAF_CE_CAPABILITIES '.length));
+        for (const name of ['trackChangesFeature', 'trackChangesModulePresent', 'trackChangesModuleConfigured', 'commentRoutesPresent']) {
+            if (typeof capabilities[name] !== 'boolean') throw new Error('Invalid CE feature/source capability evidence');
+        }
+        if (!Number.isInteger(capabilities.routerFilesInspected) || capabilities.routerFilesInspected < 1) throw new Error('CE routers were not inspected');
+        const runningServerId = (await docker(['ps', '-q', 'server'])).trim();
+        const runningImageId = (await command('docker', ['inspect', '--format', '{{.Image}}', runningServerId])).trim();
+        const runningDigests = JSON.parse(await command('docker', ['image', 'inspect', runningImageId, '--format', '{{json .RepoDigests}}']));
+        const expectedCeDigest = 'sharelatex/sharelatex@sha256:8fe42ff1991cb0cd5a3750171d2c568f78cd8c75f60eba1279e5ddf6fd427271';
+        if (!runningDigests.includes(expectedCeDigest)) throw new Error('Running CE container does not match the exact inspected official image');
+        capabilities.imageDigest = expectedCeDigest.split('@')[1];
+        capabilities.runningImageId = runningImageId;
+        capabilities.imageProofSource = 'Running server container immutable Image ID';
+        report.ceCapabilities = capabilities; save();
         console.log('Acceptance: two synthetic server accounts created; starting isolated native editor.');
         const executable = await downloadAndUnzipVSCode({version,
             cachePath: process.env.OVERLEAF_VSCODE_CACHE || path.join(os.tmpdir(), 'overleaf-vscode-compat')});
@@ -204,7 +220,7 @@ async function main() {
             nonemptyRandomUnlockPassword: true, serviceOwnerMatchesTaskDaemon: true, collectionUnlocked: true, roundTrip: true, passwordProtectedBinaryFormat: true}; save();
         const profile = path.join(directory, 'profile');
         const env = {...desktopEnv, OVERLEAF_CE_ACCOUNT_FILE: accountPath, OVERLEAF_CE_STATE_FILE: statePath,
-            OVERLEAF_CE_URL: url, OVERLEAF_CE_REPORT: reportPath, OVERLEAF_SELF_HOSTED_ACCEPTANCE: '1',
+            OVERLEAF_CE_URL: url, OVERLEAF_CE_REPORT: reportPath, OVERLEAF_CE_CAPABILITIES: JSON.stringify(capabilities), OVERLEAF_SELF_HOSTED_ACCEPTANCE: '1',
             OVERLEAF_LIVE_REPORT: path.join(directory, 'live-report.json')};
         delete env.ELECTRON_RUN_AS_NODE; delete env.VSCODE_IPC_HOOK_CLI;
         const launch = async phase => {

@@ -58,4 +58,26 @@ async function withDeadline(operation, milliseconds, message) {
         })]);
     } finally { clearTimeout(timer); }
 }
-module.exports = {beginPhase, failPhase, completePhase, verifyPhase, withDeadline};
+function confirmUnsupportedCeComments(capabilities, probe) {
+    assert.equal(capabilities.imageDigest, 'sha256:8fe42ff1991cb0cd5a3750171d2c568f78cd8c75f60eba1279e5ddf6fd427271',
+        'Unsupported comments require the exact inspected official CE image');
+    for (const key of ['trackChangesFeature', 'trackChangesModulePresent', 'trackChangesModuleConfigured', 'commentRoutesPresent']) {
+        assert.equal(capabilities[key], false, `Unsupported comments require confirmed ${key} absence`);
+    }
+    assert(Number.isInteger(capabilities.routerFilesInspected) && capabilities.routerFilesInspected > 0,
+        'Actual version-matched server router sources must have been inspected');
+    assert.match(probe.projectId, /^[0-9a-f]{24}$/);
+    assert.equal(probe.method, 'GET');
+    assert.equal(probe.path, `/project/${probe.projectId}/threads`, 'Probe must use the exact production comment route');
+    assert.equal(probe.authenticated, true);
+    assert.equal(probe.httpStatus, 404);
+    assert.equal(probe.notFoundBody, true, 'Authenticated missing-route response must identify Not Found');
+    return {status: 'unsupported', reason: 'Official CE image omits its track-changes module and comment routes; authenticated exact endpoint is Not Found.'};
+}
+function canonicalNotFoundBody(body, requestedPath) {
+    const visible = body.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
+        .replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+    return /\bnot[ -]found\b|\bcan(?:not|['’]t) find (?:the|that|this) page\b/i.test(visible)
+        || visible.includes(`Cannot GET ${requestedPath}`);
+}
+module.exports = {beginPhase, failPhase, completePhase, verifyPhase, withDeadline, confirmUnsupportedCeComments, canonicalNotFoundBody};

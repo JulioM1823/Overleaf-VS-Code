@@ -98,3 +98,31 @@ test('native login deadlines reject a hung operation with a fixed diagnostic and
         error => error.code === 'ORBITLEAF_CE_DEADLINE' && error.message === 'Synthetic login deadline');
     assert.equal(await withDeadline(async () => 'complete', 1000, 'Unused deadline'), 'complete');
 });
+
+const commentCapabilities = {imageDigest: 'sha256:8fe42ff1991cb0cd5a3750171d2c568f78cd8c75f60eba1279e5ddf6fd427271',
+    trackChangesFeature: false, trackChangesModulePresent: false, trackChangesModuleConfigured: false,
+    commentRoutesPresent: false, routerFilesInspected: 16};
+const commentProbe = {projectId: '0123456789abcdef01234567', method: 'GET', path: '/project/0123456789abcdef01234567/threads',
+    authenticated: true, httpStatus: 404, notFoundBody: true};
+test('CE unsupported comments require both an authenticated exact route failure and actual exact-image source absence', () => {
+    const {confirmUnsupportedCeComments} = require('../scripts/self-hosted-phase-report.cjs');
+    const result = confirmUnsupportedCeComments(commentCapabilities, commentProbe);
+    assert.equal(result.status, 'unsupported'); assert.equal(result.passed, undefined);
+    for (const key of ['trackChangesFeature', 'trackChangesModulePresent', 'trackChangesModuleConfigured', 'commentRoutesPresent']) {
+        assert.throws(() => confirmUnsupportedCeComments({...commentCapabilities, [key]: true}, commentProbe));
+    }
+    assert.throws(() => confirmUnsupportedCeComments({...commentCapabilities, imageDigest: 'sha256:different'}, commentProbe));
+    assert.throws(() => confirmUnsupportedCeComments({...commentCapabilities, routerFilesInspected: 0}, commentProbe));
+    assert.throws(() => confirmUnsupportedCeComments(commentCapabilities, {...commentProbe, path: commentProbe.path + '/wrong'}));
+    assert.throws(() => confirmUnsupportedCeComments(commentCapabilities, {...commentProbe, authenticated: false}));
+    assert.throws(() => confirmUnsupportedCeComments(commentCapabilities, {...commentProbe, httpStatus: 403}));
+    assert.throws(() => confirmUnsupportedCeComments(commentCapabilities, {...commentProbe, notFoundBody: false}));
+});
+
+test('comment Not Found evidence comes from canonical visible text, not opaque script data or a bare status number', () => {
+    const {canonicalNotFoundBody} = require('../scripts/self-hosted-phase-report.cjs');
+    assert(canonicalNotFoundBody('<h1>Page Not Found</h1>', commentProbe.path));
+    assert(canonicalNotFoundBody('<pre>Cannot GET ' + commentProbe.path + '</pre>', commentProbe.path));
+    assert(!canonicalNotFoundBody('<script>const value="not found";</script><p>Unknown error 404</p>', commentProbe.path));
+    assert(!canonicalNotFoundBody('<pre>Cannot GET /wrong/route</pre>', commentProbe.path));
+});
